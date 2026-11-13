@@ -1,8 +1,0 @@
-# Caddy gets a free https certificate for your address automatically.
-{$DOMAIN} {
-	encode gzip
-	request_body {
-		max_size 60MB
-	}
-	reverse_proxy app:3000
-}
