@@ -1,0 +1,39 @@
+// Fit-Rend-Base talks to LeadReplyRadar here. Every call is signed with FRB_SECRET.
+//   ping: checks the link works and says which Gmail sends.
+//   send: sends one campaign email from your Gmail (after you pressed Start in Fit-Rend-Base).
+import { NextResponse } from 'next/server';
+import { frbVerify } from '../../../lib/frb';
+import { campaignInfo, sendForFrb } from '../../../lib/outreach';
+import { loadStore } from '../../../lib/store';
+
+export const runtime = 'nodejs';
+export const dynamic = 'force-dynamic';
+
+export async function POST(request) {
+  const raw = await request.text();
+  if (raw.length > 100000) return NextResponse.json({ error: 'Too big' }, { status: 413 });
+  if (!frbVerify(request, raw)) {
+    return NextResponse.json({ error: 'LeadReplyRadar did not accept the signature. Check FRB_SECRET on Render matches Fit-Rend-Base.', code: 'SIGNATURE' }, { status: 401 });
+  }
+  let data;
+  try {
+    data = JSON.parse(raw);
+  } catch (e) {
+    return NextResponse.json({ error: 'Send JSON', code: 'BAD' }, { status: 400 });
+  }
+  if (data.type === 'ping') {
+    await loadStore().catch(() => {});
+    return NextResponse.json({ ok: true, ...campaignInfo() });
+  }
+  if (data.type === 'send') {
+    try {
+      const r = await sendForFrb(data);
+      console.log('LeadReplyRadar sent a Fit-Rend-Base ' + (data.test ? 'test ' : '') + 'email from ' + r.from);
+      return NextResponse.json(r);
+    } catch (e) {
+      const code = e.code || 'FAILED';
+      return NextResponse.json({ error: String(e.message || e), code }, { status: code === 'BAD' ? 400 : code === 'DAILY' ? 429 : 502 });
+    }
+  }
+  return NextResponse.json({ error: 'Unknown type', code: 'BAD' }, { status: 400 });
+}
