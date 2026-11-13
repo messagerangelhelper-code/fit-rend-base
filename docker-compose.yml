@@ -1,0 +1,75 @@
+# Fit-Rend-Base: everything on one server.
+# db = Postgres, app = Fit-Rend-Base, caddy = https, backup = daily backups, keepalive = keeps the free server busy enough.
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: fitrendbase
+    volumes:
+      - dbdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d fitrendbase"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  app:
+    build: .
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD}@db:5432/fitrendbase
+      APP_SECRET: ${APP_SECRET}
+    volumes:
+      - files:/data
+      - backups:/backups
+      - ./state:/state:ro
+    depends_on:
+      db:
+        condition: service_healthy
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      DOMAIN: ${DOMAIN}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddydata:/data
+      - caddyconfig:/config
+    depends_on:
+      - app
+  backup:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      PGPASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - backups:/backups
+      - files:/data:ro
+      - ./scripts/backup.sh:/backup.sh:ro
+    entrypoint: ["sh", "/backup.sh"]
+    depends_on:
+      db:
+        condition: service_healthy
+      app:
+        condition: service_started
+  keepalive:
+    image: node:22-alpine
+    restart: unless-stopped
+    environment:
+      KEEPALIVE_CPU: ${KEEPALIVE_CPU:-0.5}
+    volumes:
+      - ./scripts/keepalive.js:/keepalive.js:ro
+    command: ["node", "/keepalive.js"]
+    cpu_shares: 64
+volumes:
+  dbdata:
+  files:
+  backups:
+  caddydata:
+  caddyconfig:
