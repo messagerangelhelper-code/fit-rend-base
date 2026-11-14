@@ -9,6 +9,7 @@ import {
 import * as P from '../../lib/projects';
 import * as CRM from '../../lib/crm';
 import * as PL from '../../lib/pipeline';
+import * as DOM from '../../lib/domains';
 import crypto from 'crypto';
 import { promises as dns } from 'dns';
 
@@ -326,6 +327,9 @@ const MAIN = {
       const repos = await q("select r.id, r.name from aio.grants g join aio.repos r on r.id = g.resource_id where g.user_id = $1 and g.kind = 'repo' order by r.name", [s.user_id]);
       const projects = await q("select p.id, p.slug, p.name from aio.grants g join aio.projects p on p.id = g.resource_id where g.user_id = $1 and g.kind = 'project' order by p.slug", [s.user_id]);
       out.repos = repos.rows; out.projects = projects.rows;
+      const doms = await q("select name, status, price_cents, error, created_at from aio.domain_orders where user_id = $1 and status <> 'expired' order by id desc limit 20", [s.user_id]);
+      out.domains = doms.rows;
+      out.canBuyDomain = (await DOM.domainSettings()).customersOn && Boolean(st.stripeKey_enc && st.whsec_enc) && u.plan !== 'cancelled';
       if (st.rewardsOn && u.ref_code) {
         const rr = await q("select count(*)::int as friends, count(*) filter (where status = 'given')::int as given from aio.referrals where referrer_id = $1", [s.user_id]);
         out.share = { link: `${baseOf(req)}/r/${u.ref_code}`, ...rr.rows[0] };
@@ -1001,12 +1005,94 @@ const MAIN = {
     await q('update aio.domains set points_here = $2, seen_ips = $3, checked_at = now() where id = $1', [body.id, ok, ips.join(', ')]);
     return { ok, ips, serverIp: want };
   },
+  async dnsSetSite({ req, s, body }) {
+    if (!s.is_owner) fail(403, 'OWNER_ONLY', 'Only the owner goes into the DNS room.');
+    const site = await q('select id, slug from aio.sites where id = $1', [body.siteId]);
+    if (!site.rows[0]) fail(400, 'BAD', 'Pick which site this domain should show.');
+    const r = await q('update aio.domains set site_id = $2 where id = $1 returning name', [body.id, site.rows[0].id]);
+    if (!r.rows[0]) fail(404, 'NOTFOUND', 'Domain not found');
+    await audit(s, 'dns.site', `${r.rows[0].name} to ${site.rows[0].slug}`, ipOf(req));
+    return { ok: true };
+  },
   async dnsDelete({ req, s, body }) {
     if (!s.is_owner) fail(403, 'OWNER_ONLY', 'Only the owner goes into the DNS room.');
     needCleared(s);
     const r = await q('delete from aio.domains where id = $1 returning name', [body.id]);
     if (r.rows[0]) await audit(s, 'dns.delete', r.rows[0].name, ipOf(req));
     return { ok: true };
+  },
+  /* ---- DNS room: buy a domain through Dynadot ---- */
+  async domainSettingsGet({ s }) {
+    if (!s.is_owner) fail(403, 'OWNER_ONLY', 'Only the owner goes into the DNS room.');
+    const st = await DOM.domainSettings(); const pl = await PL.pipeSettings();
+    const orders = await q('select o.id, o.name, o.status, o.price_cents, o.cost_cents, o.error, o.expires, o.created_at, u.email from aio.domain_orders o left join aio.users u on u.id = o.user_id order by o.id desc limit 50');
+    return { on: st.on, customersOn: st.customersOn, hasKey: Boolean(st.key_enc), addOnCents: st.addOnCents, maxCostCents: st.maxCostCents,
+      stripeReady: Boolean(pl.whsec_enc && pl.stripeKey_enc), orders: orders.rows };
+  },
+  async domainSettingsSet({ req, s, body }) {
+    if (!s.is_owner) fail(403, 'OWNER_ONLY', 'Only the owner goes into the DNS room.');
+    needCleared(s);
+    const patch = {};
+    if (body.key !== undefined) {
+      const v = String(body.key || '').trim();
+      if (v && !/^[A-Za-z0-9_-]{10,200}$/.test(v)) fail(400, 'BAD', 'That does not look like a Dynadot API key. Copy it from Dynadot: Tools > API.');
+      patch.key_enc = v ? encrypt(v) : '';
+    }
+    if (body.addOnCents !== undefined) patch.addOnCents = Math.max(0, Math.min(100000, Math.round(Number(body.addOnCents) || 0)));
+    if (body.maxCostCents !== undefined) patch.maxCostCents = Math.max(100, Math.min(100000, Math.round(Number(body.maxCostCents) || 3000)));
+    const cur = await DOM.domainSettings();
+    for (const k of ['on', 'customersOn']) if (body[k] !== undefined) patch[k] = Boolean(body[k]);
+    if ((patch.on || patch.customersOn) && !(patch.key_enc || cur.key_enc)) fail(400, 'BAD', 'Save your Dynadot API key first.');
+    if (patch.customersOn) { const pl = await PL.pipeSettings(); if (!pl.whsec_enc || !pl.stripeKey_enc) fail(400, 'BAD', 'Customers pay through Stripe. Save the Stripe signing secret and key in Admin > Customer pipeline first.'); }
+    await DOM.saveDomainSettings(patch);
+    await audit(s, 'domain.settings', Object.keys(patch).map((k) => (k === 'key_enc' ? (patch[k] ? 'Dynadot key saved' : 'Dynadot key removed') : `${k}=${patch[k]}`)).join(', '), ipOf(req));
+    return { ok: true };
+  },
+  async domainKeyCheck({ s }) {
+    if (!s.is_owner) fail(403, 'OWNER_ONLY', 'Only the owner goes into the DNS room.');
+    const st = await DOM.domainSettings();
+    return { ok: true, balance: await DOM.balance(st) };
+  },
+  async domainSearch({ s, body }) {
+    const st = await DOM.domainSettings();
+    if (s.is_owner) { if (!st.on) fail(400, 'OFF', 'Buy a domain is off. Turn it on in the DNS room.'); }
+    else if (!s.is_customer || !st.customersOn) fail(403, 'OFF', 'Buying a domain is not open yet.');
+    return { results: await DOM.search(st, body.name) };
+  },
+  async domainBuy({ req, s, body }) {
+    if (!s.is_owner) fail(403, 'OWNER_ONLY', 'Only the owner goes into the DNS room.');
+    needCleared(s);
+    const st = await DOM.domainSettings();
+    if (!st.on) fail(400, 'OFF', 'Buy a domain is off. Turn it on in the DNS room.');
+    const [x] = await DOM.search(st, DOM.cleanName(body.name));
+    if (!x.available) fail(400, 'BAD', `${x.name} can't be bought: ${x.note || 'not available'}.`);
+    if (Number(body.confirmCents) !== x.costCents) fail(400, 'PRICE', `The price changed to $${(x.costCents / 100).toFixed(2)}. Search again and check it.`);
+    let siteId = null;
+    if (body.siteId) { const r = await q('select id from aio.sites where id = $1', [body.siteId]); siteId = r.rows[0]?.id || null; }
+    const o = await q("insert into aio.domain_orders (name, site_id, cost_cents, price_cents, status, created_by) values ($1,$2,$3,$3,'paid',$4) on conflict do nothing returning *", [x.name, siteId, x.costCents, s.username]);
+    if (!o.rows[0]) fail(400, 'BAD', 'That domain is already being bought.');
+    await audit(s, 'domain.buy', `${x.name} for $${(x.costCents / 100).toFixed(2)} from the Dynadot balance`, ipOf(req));
+    const done = await DOM.finishOrder(o.rows[0], await serverIp(req), s.username);
+    if (!done.ok) fail(400, 'DYNADOT', done.error);
+    return { ok: true, name: x.name, expires: done.expires };
+  },
+  async myDomainBuy({ req, s, body }) {
+    if (!s.is_customer) fail(400, 'BAD', 'This button is for customer accounts.');
+    if (s.plan === 'cancelled') fail(400, 'PLAN', "Your plan ended, so you can't buy a domain here.");
+    const st = await DOM.domainSettings(); const pl = await PL.pipeSettings();
+    if (!st.customersOn || !pl.stripeKey_enc || !pl.whsec_enc) fail(403, 'OFF', 'Buying a domain is not open yet.');
+    await q("update aio.domain_orders set status = 'expired' where status = 'waiting' and created_at < now() - interval '1 day'");
+    const waiting = await q("select count(*)::int as n from aio.domain_orders where user_id = $1 and status = 'waiting'", [s.user_id]);
+    if (waiting.rows[0].n >= 3) fail(400, 'BAD', 'Finish or wait out your other domain payments first.');
+    const [x] = await DOM.search(st, DOM.cleanName(body.name));
+    if (!x.available) fail(400, 'BAD', `${x.name} can't be bought: ${x.note || 'not available'}.`);
+    if (Number(body.confirmCents) !== x.priceCents) fail(400, 'PRICE', `The price changed to $${(x.priceCents / 100).toFixed(2)}. Search again and check it.`);
+    const o = await q('insert into aio.domain_orders (user_id, name, cost_cents, price_cents, created_by) values ($1,$2,$3,$4,$5) on conflict do nothing returning *', [s.user_id, x.name, x.costCents, x.priceCents, s.username]);
+    if (!o.rows[0]) fail(400, 'BAD', 'Someone is already buying that domain. Try another.');
+    const session = await DOM.stripeCheckout(decrypt(pl.stripeKey_enc), { order: o.rows[0], email: s.email, baseUrl: baseOf(req) });
+    await q('update aio.domain_orders set stripe_session = $2 where id = $1', [o.rows[0].id, session.id]);
+    await audit(s, 'domain.checkout', x.name, ipOf(req));
+    return { url: session.url };
   },
   /* ---- AI access: keys that only reach the Fit room and the Base room ---- */
   async aiKeyList({ s }) {

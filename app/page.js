@@ -427,6 +427,7 @@ function MyHome({ me, go, reload }) {
         <div className="list">{d.projects.map((p) => <div key={p.id} className="click" onClick={() => go({ tab: 'database' })}><span className="grow"><b>{p.name || p.slug}</b></span><span className="pill">Open</span></div>)}</div>
         {d.used.projects < d.limits.projects && <div className="row"><button className="primary" onClick={run(async () => { await api('myProjectCreate', { name: 'data' }); toast('Your database is ready'); load(); reload(); })}>Make my database</button></div>}
       </div>
+      <MyDomain d={d} load={load} />
       {d.share && (
         <div className="card">
           <h3>🎁 Get a free month</h3>
@@ -1396,6 +1397,7 @@ function DnsRoom({ startNew }) {
     <div>
       <div className="row"><h2 className="grow">DNS room · Your own domain</h2>{step === 0 && <button className="primary" onClick={start}>Use my own domain</button>}</div>
       <p className="small muted">Show a site from the Rend room on a domain you bought, like mysite.com. Free https is set up for you. Two steps.</p>
+      <BuyDomain sites={sites} reload={load} />
 
       {step === 1 && (
         <div className="card">
@@ -1434,9 +1436,10 @@ function DnsRoom({ startNew }) {
           <div className="list">
             {d.items.map((x) => (
               <div className="item" key={x.id}>
-                <span className="grow"><b>{x.points_here ? '✅' : '⏳'} {x.name}</b><br /><span className="small muted">shows {x.slug || 'a deleted site'}{x.visibility && x.visibility !== 'public' ? ' (private, set it to Anyone with the link)' : ''} · {x.checked_at ? 'checked ' + when(x.checked_at) : 'not checked yet'}</span>
+                <span className="grow"><b>{x.points_here ? '✅' : '⏳'} {x.name}</b><br /><span className="small muted">{x.slug ? 'shows ' + x.slug : 'no site yet'}{x.visibility && x.visibility !== 'public' ? ' (private, set it to Anyone with the link)' : ''} · {x.checked_at ? 'checked ' + when(x.checked_at) : 'not checked yet'}</span>
                   {res[x.id] && !res[x.id].ok && <><br /><span className="small muted">Add this record: A, {recordFor(x.name, d.serverIp).name}, {d.serverIp}</span></>}
                 </span>
+                {!x.slug && sites.length > 0 && <select defaultValue="" onChange={(e) => e.target.value && run(async () => { await api('dnsSetSite', { id: x.id, siteId: e.target.value }); load(); })()} style={{ width: 'auto' }}><option value="">Pick a site</option>{sites.map((st) => <option key={st.id} value={st.id}>{st.slug}</option>)}</select>}
                 {x.points_here && <a href={'https://' + x.name} target="_blank" rel="noopener noreferrer"><button>Open</button></a>}
                 <button onClick={() => check(x)}>Check it</button>
                 <button className="danger" onClick={run(async () => { if (!confirm(`Remove ${x.name}? The domain stops showing your site.`)) return; await api('dnsDelete', { id: x.id }); load(); })}>Remove</button>
@@ -1446,6 +1449,85 @@ function DnsRoom({ startNew }) {
         </div>
       )}
       {d && !d.items.length && step === 0 && <div className="muted">No domains yet. Tap Use my own domain to start.</div>}
+    </div>
+  );
+}
+const money = (c) => '$' + (Number(c || 0) / 100).toFixed(2);
+// DNS room > Buy a domain: search, see the price, buy. Dynadot registers it and points it here.
+function BuyDomain({ sites, reload }) {
+  const [d, load] = useLoad(() => api('domainSettingsGet'), []);
+  const [open, setOpen] = useState(false);
+  const [setup, setSetup] = useState(false);
+  const [word, setWord] = useState(''); const [found, setFound] = useState(null); const [pick, setPick] = useState(null);
+  const [siteId, setSiteId] = useState(''); const [key, setKey] = useState(''); const [f, setF] = useState(null);
+  const [bal, setBal] = useState(null);
+  useEffect(() => { if (d && !f) setF({ addOn: (d.addOnCents / 100).toFixed(2), maxCost: (d.maxCostCents / 100).toFixed(2) }); }, [d]); // eslint-disable-line react-hooks/exhaustive-deps
+  if (!d) return null;
+  const save = (patch, msg) => run(async () => { await api('domainSettingsSet', patch); toast(msg || 'Saved'); load(); })();
+  return (
+    <div className="card">
+      <div className="row"><h3 className="grow">🛒 Buy a domain</h3>
+        {d.on && <button className="primary" onClick={() => { setOpen(!open); setFound(null); setPick(null); }}>{open ? 'Close' : 'Find a domain'}</button>}
+        <button onClick={() => setSetup(!setup)}>{setup ? 'Hide settings' : 'Settings'}</button></div>
+      {!d.on && !setup && <p className="small muted">Off. Press Settings, save your Dynadot API key, then turn it on.</p>}
+      {open && d.on && (
+        <div>
+          <div className="row"><input className="grow" placeholder="A name, like mysite or mysite.com" value={word} onChange={(e) => setWord(e.target.value)} autoCapitalize="none" />
+            <button className="primary" disabled={!word.trim()} onClick={run(async () => { setPick(null); setFound((await api('domainSearch', { name: word })).results); })}>Search</button></div>
+          <div className="list">
+            {(found || []).map((x) => (
+              <div key={x.name}><span className="grow"><b>{x.available ? '✅' : '❌'} {x.name}</b><br /><span className="small muted">{x.available ? money(x.costCents) + ' a year from your Dynadot balance' + (d.addOnCents ? ` · customers pay ${money(x.priceCents)}` : '') : x.note}</span></span>
+                {x.available && <button onClick={() => setPick(x)}>Buy</button>}</div>
+            ))}
+          </div>
+          {pick && (
+            <div className="box">
+              <p><b>Buy {pick.name} for {money(pick.costCents)}?</b></p>
+              <p className="small muted">Dynadot takes {money(pick.costCents)} from your Dynadot balance for 1 year. This can't be undone. It is pointed at this server and added below, with free https.</p>
+              {sites.length > 0 && <><label>Which site should it show? (you can pick later)</label><select value={siteId} onChange={(e) => setSiteId(e.target.value)}><option value="">Pick later</option>{sites.map((x) => <option key={x.id} value={x.id}>{x.slug}</option>)}</select></>}
+              <div className="row"><button className="primary" onClick={run(async () => { const o = await api('domainBuy', { name: pick.name, confirmCents: pick.costCents, siteId: siteId || null }); toast(o.name + ' is yours'); setPick(null); setFound(null); setOpen(false); load(); reload(); })}>Yes, buy it for {money(pick.costCents)}</button><button onClick={() => setPick(null)}>Cancel</button></div>
+            </div>
+          )}
+        </div>
+      )}
+      {setup && f && (
+        <div>
+          <p className="small">1. Your Dynadot API key. {d.hasKey ? '✅ Saved.' : 'Not saved yet.'} Get it at https://www.dynadot.com/account/domain/setting/api.html</p>
+          <div className="row"><input className="grow" type="password" placeholder="Dynadot API key" value={key} onChange={(e) => setKey(e.target.value)} /><button className="primary" disabled={!key} onClick={() => { save({ key }, 'Dynadot key saved'); setKey(''); }}>Save key</button>
+            {d.hasKey && <button onClick={run(async () => setBal((await api('domainKeyCheck')).balance))}>Check key</button>}</div>
+          {bal !== null && <p className="small">✅ The key works. Dynadot balance: {String(bal)}</p>}
+          <p className="small">2. Your add-on for customers (what you earn on each domain), and the most Dynadot may charge for one.</p>
+          <div className="row"><span className="small muted">Add-on $</span><input type="number" min="0" step="0.01" value={f.addOn} onChange={(e) => setF({ ...f, addOn: e.target.value })} style={{ width: 90 }} />
+            <span className="small muted">Most $</span><input type="number" min="1" step="0.01" value={f.maxCost} onChange={(e) => setF({ ...f, maxCost: e.target.value })} style={{ width: 90 }} />
+            <button onClick={() => save({ addOnCents: Math.round(Number(f.addOn) * 100), maxCostCents: Math.round(Number(f.maxCost) * 100) })}>Save</button></div>
+          <div className="row" style={{ alignItems: 'flex-start', margin: '10px 0' }}><span className="grow"><b>3. You can buy domains</b><br /><span className="small muted">Paid from your Dynadot balance.</span></span>
+            <button className={d.on ? 'primary' : ''} onClick={() => save({ on: !d.on }, d.on ? 'Turned off' : 'Turned on')}>{d.on ? 'On' : 'Off'}</button></div>
+          <div className="row" style={{ alignItems: 'flex-start', margin: '10px 0' }}><span className="grow"><b>4. Customers can buy domains</b><br /><span className="small muted">On their My space. They pay you through Stripe first{d.stripeReady ? '.' : '. Needs the Stripe signing secret and key in Admin > Customer pipeline.'}</span></span>
+            <button className={d.customersOn ? 'primary' : ''} onClick={() => save({ customersOn: !d.customersOn }, d.customersOn ? 'Turned off' : 'Turned on')}>{d.customersOn ? 'On' : 'Off'}</button></div>
+          {d.orders.length > 0 && <><h3>Domains bought</h3><div className="list">{d.orders.map((o) => <div key={o.id}><span className="grow small"><b>{o.name}</b> · {o.status} · {money(o.price_cents)}{o.email ? ' · ' + o.email : ''} · {when(o.created_at)}{o.error ? <><br /><span style={{ color: 'var(--bad)' }}>{o.error}</span></> : null}</span></div>)}</div></>}
+        </div>
+      )}
+    </div>
+  );
+}
+// My space > Your domain: a customer finds a domain and pays through Stripe.
+function MyDomain({ d, load }) {
+  const [word, setWord] = useState(''); const [found, setFound] = useState(null);
+  return (
+    <div className="card">
+      <h3>3. Your domain</h3>
+      <div className="list">{(d.domains || []).map((x) => <div key={x.name}><span className="grow"><b>{x.name}</b><br /><span className="small muted">{x.status === 'registered' ? 'Yours. We connect it to your app.' : x.status === 'waiting' ? 'Waiting for your payment' : x.status === 'paid' ? 'Paid, being set up' : 'Something went wrong. Press Get help.'}</span></span></div>)}</div>
+      {d.canBuyDomain && (
+        <>
+          <div className="row"><input className="grow" placeholder="A name, like myshop" value={word} onChange={(e) => setWord(e.target.value)} autoCapitalize="none" />
+            <button className="primary" disabled={!word.trim()} onClick={run(async () => setFound((await api('domainSearch', { name: word })).results))}>Search</button></div>
+          <div className="list">{(found || []).map((x) => (
+            <div key={x.name}><span className="grow"><b>{x.available ? '✅' : '❌'} {x.name}</b><br /><span className="small muted">{x.available ? money(x.priceCents) + ' for 1 year' : x.note}</span></span>
+              {x.available && <button onClick={run(async () => { const o = await api('myDomainBuy', { name: x.name, confirmCents: x.priceCents }); load(); window.location.href = o.url; })}>Pay {money(x.priceCents)}</button>}</div>
+          ))}</div>
+        </>
+      )}
+      {!d.canBuyDomain && !(d.domains || []).length && <p className="small muted">Buying a domain here is coming soon.</p>}
     </div>
   );
 }
