@@ -2,7 +2,7 @@ export const metadata = { title: 'Fit-Rend-Base', description: 'Your own repos, 
 export const viewport = { width: 'device-width', initialScale: 1 };
 
 const css = `
-:root{--bg:#0f1419;--panel:#171e26;--panel2:#1e2731;--line:#2b3744;--text:#e7ecf1;--muted:#9fb0c0;--accent:#3fb950;--accent2:#7cc4ff;--bad:#f85149;--warn:#d29922}
+:root{--bg:#0f1419;--panel:#171e26;--panel2:#1e2731;--line:#2b3744;--text:#e7ecf1;--muted:#9fb0c0;--accent:#3fb950;--accent2:#7cc4ff;--bad:#f85149;--warn:#d29922;--orange:#f0883e}
 *{box-sizing:border-box}html,body{margin:0;background:var(--bg);color:var(--text);font:15px/1.45 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
 a{color:var(--accent2)}button,input,select,textarea{font:inherit;color:inherit}
 button{background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:8px 12px;cursor:pointer}
@@ -30,6 +30,9 @@ th,td{border-bottom:1px solid var(--line);padding:6px 8px;text-align:left;white-
 .diff div{white-space:pre-wrap;font-family:ui-monospace,Menlo,monospace;font-size:12px;padding:0 6px}.diff .add{background:#12361d}.diff .del{background:#3d1517}
 .keybox{display:flex;gap:6px;align-items:flex-start;flex-wrap:wrap}.keybox .keyline,.keybox .keyarea{flex:1 1 220px;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:13px}
 .keybox .keyarea{min-height:110px;word-break:break-all}button.icon{padding:8px 10px;line-height:1}
+/* Every other button is orange, so buttons side by side are easy to tell apart. Red (delete) buttons stay red. */
+:is(.row,.top,.gd-nav,.gd-tiles,.keybox,.box,.all,.list>div)>button:nth-of-type(even):not(.danger):not(.link):not(.pill){background:var(--orange);border-color:var(--orange);color:#2b1400;font-weight:600}
+.top>button.pill:nth-of-type(even){border-color:var(--orange);color:#ffc08a}
 h2{font-size:18px;margin:6px 0 10px}h3{font-size:15px;margin:14px 0 8px}code{background:#0b1015;border:1px solid var(--line);border-radius:5px;padding:1px 5px;font-size:13px}
 `;
 
