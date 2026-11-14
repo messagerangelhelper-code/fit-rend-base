@@ -1,8 +1,32 @@
 # Caddy gets a free https certificate for your address automatically.
+{
+	# DNS room: your own domains get a free https certificate too,
+	# but only domains you added in the DNS room (Caddy asks the app first).
+	on_demand_tls {
+		ask http://app:3000/api/tls
+	}
+}
+
 {$DOMAIN} {
 	encode gzip
 	request_body {
 		max_size 60MB
 	}
-	reverse_proxy app:3000
+	reverse_proxy app:3000 {
+		header_up -X-Frb-Custom-Host
+	}
+}
+
+# Any other domain that points here (set up in the DNS room) shows its site.
+https:// {
+	tls {
+		on_demand
+	}
+	encode gzip
+	request_body {
+		max_size 10MB
+	}
+	reverse_proxy app:3000 {
+		header_up X-Frb-Custom-Host {host}
+	}
 }
