@@ -4,15 +4,20 @@
 //   /hooks/<token>           incoming deploy hooks
 //   /in/leads                leads from LeadReplyRadar (signed)
 //   /u/<token>               unsubscribe from campaign emails
+//   any path on your own domain (DNS room) shows that domain's site
 import { NextResponse } from 'next/server';
 
 export function middleware(req) {
   const { pathname } = req.nextUrl;
   const to = (k, a, b) => {
     const headers = new Headers(req.headers);
+    headers.delete('x-frb-custom-host');
     headers.set('x-cc-k', k); headers.set('x-cc-a', a); headers.set('x-cc-b', encodeURIComponent(b || ''));
     return NextResponse.rewrite(new URL('/api/pub' + req.nextUrl.search, req.url), { request: { headers } });
   };
+  // Your own domain (set up in the DNS room): Caddy marks it, and the whole domain shows one site.
+  const custom = String(req.headers.get('x-frb-custom-host') || '').trim().toLowerCase();
+  if (custom) return to('dsite', custom, pathname.slice(1));
   let m = pathname.match(/^\/s\/([a-z0-9-]+)(\/.*)?$/);
   if (m) {
     if (!m[2]) return NextResponse.redirect(new URL(pathname + '/' + req.nextUrl.search, req.url).toString(), 308);
@@ -28,5 +33,5 @@ export function middleware(req) {
   if (pathname.startsWith('/api/pub')) return new NextResponse('Not found', { status: 404 });
   return NextResponse.next();
 }
-
-export const config = { matcher: ['/s/:path*', '/db/:path*', '/hooks/:path*', '/in/:path*', '/u/:path*', '/api/pub'] };
+// Every address goes through here, so a custom domain can never reach the sign-in or the rooms.
+export const config = { matcher: ['/:path*'] };
