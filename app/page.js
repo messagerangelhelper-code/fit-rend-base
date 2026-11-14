@@ -1,5 +1,6 @@
 'use client';
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { Guide } from './guide';
 
 /* ================= helpers ================= */
 let clearanceAsk = null;
@@ -39,9 +40,8 @@ function bufToB64(buf) {
 }
 function b64ToText(b64) { try { return new TextDecoder().decode(Uint8Array.from(atob(b64), (c) => c.charCodeAt(0))); } catch { return ''; } }
 const LEVEL_NAMES = { none: 'No access', viewer: 'Viewer', developer: 'Developer', admin: 'Admin', owner: 'Owner', some: 'Some items' };
-const SECTION_NAMES = { repos: 'Fit room', deploys: 'Rend room', database: 'Base room', contacts: 'Contacts', handover: 'Handover room', connectors: 'Connectors', admin: 'Admin' };
-const OWNER_ONLY = ['deploys'];
-
+const SECTION_NAMES = { repos: 'Fit room', deploys: 'Rend room', dns: 'DNS room', database: 'Base room', contacts: 'Contacts', handover: 'Handover room', connectors: 'Connectors', admin: 'Admin' };
+const OWNER_ONLY = ['deploys', 'dns'];
 /* A box for a key or value.
    Double tap: bigger. One more tap: small again. The eye shows or hides it. Generate puts a strong new key in the box. */
 function newKey(prefix = '') {
@@ -80,7 +80,6 @@ function KeyBox({ value, onChange, reveal, readOnly, generate = true, prefix = '
   );
 }
 const atLeast = (lvl, need) => ['none', 'viewer', 'developer', 'admin', 'owner'].indexOf(lvl) >= ['none', 'viewer', 'developer', 'admin', 'owner'].indexOf(need);
-
 function Modal({ children, onClose }) {
   return <div className="modal" onClick={(e) => { if (e.target === e.currentTarget && onClose) onClose(); }}><div className="card">{children}</div></div>;
 }
@@ -103,7 +102,6 @@ function lineDiff(a, b) {
   while (i < m) out.push(['-', x[i++]]); while (j < n) out.push(['+', y[j++]]);
   return out;
 }
-
 /* ================= app shell ================= */
 export default function Page() {
   const [st, setSt] = useState(null);
@@ -127,7 +125,6 @@ export default function Page() {
     }, 20000);
     return () => { clearInterval(timer); ['mousemove', 'keydown', 'touchstart', 'click', 'scroll'].forEach((e) => window.removeEventListener(e, bump)); };
   }, [st, load]);
-
   let body;
   if (!st) body = <div className="center muted">Loading…</div>;
   else if (st.error) body = <div className="center card">Could not reach the server: {st.error} <button onClick={load}>Try again</button></div>;
@@ -138,7 +135,6 @@ export default function Page() {
   else if (st.me.mustChange) body = <div className="center card"><h2>Set your own password</h2><p className="muted small">You signed in with a temporary password. Pick a new one to go on.</p><ChangePassword done={load} /></div>;
   else if (st.me.needs2faSetup) body = <div className="center card"><h2>Turn on 2-step sign-in</h2><p className="muted small">Every account here needs a code from an authenticator app (like Google Authenticator, Microsoft Authenticator or Authy) on your phone.</p><Setup2fa done={load} /></div>;
   else body = <Main me={st.me} reload={load} />;
-
   return (
     <>
       {body}
@@ -147,7 +143,6 @@ export default function Page() {
     </>
   );
 }
-
 function License({ host, done }) {
   const [code, setCode] = useState('');
   return (
@@ -259,8 +254,8 @@ function Setup2fa({ done }) {
     </div>
   );
 }
-function Account({ me, close, reload }) {
-  const [mode, setMode] = useState(null); const [c, setC] = useState(''); const [codes, setCodes] = useState(null);
+function Account({ me, close, reload, start = null }) {
+  const [mode, setMode] = useState(start === '2fa' && !me.totpOn ? '2fa' : start === 'rec' && me.totpOn ? 'rec' : null); const [c, setC] = useState(''); const [codes, setCodes] = useState(null);
   return (
     <Modal onClose={close}>
       <h2>My account</h2>
@@ -287,11 +282,33 @@ function Account({ me, close, reload }) {
     </Modal>
   );
 }
-
 function Main({ me, reload }) {
   const tabs = Object.keys(SECTION_NAMES);
-  const [tab, setTab] = useState(() => tabs.find((x) => me.levels[x] !== 'none') || 'repos');
+  // nav: which room, which part of it, and a form to open. Links like /#/contacts/link or /#/repos//new open it too.
+  const [nav, setNav] = useState(() => ({ tab: tabs.find((x) => me.levels[x] !== 'none') || 'repos', n: 0 }));
+  const tab = nav.tab;
+  const setTab = (x) => setNav((v) => ({ tab: x, n: v.n + 1 }));
   const [acct, setAcct] = useState(false);
+  const guideKey = 'frb-guide-seen-' + me.username;
+  const [guide, setGuide] = useState(() => { try { return !localStorage.getItem(guideKey); } catch { return false; } });
+  const go = (g) => {
+    if (!g) return;
+    if (g.tab === 'account') { setAcct(g.open || true); return; }
+    setAcct(false);
+    if (tabs.includes(g.tab)) setNav((v) => ({ tab: g.tab, sub: g.sub, open: g.open, n: v.n + 1 }));
+  };
+  useEffect(() => {
+    const fromHash = () => {
+      const m = (window.location.hash || '').match(/^#\/([a-z]+)(?:\/([a-z0-9]*))?(?:\/([a-z0-9]+))?/);
+      if (!m) return;
+      if (m[1] === 'guide') setGuide(Date.now()); else go({ tab: m[1], sub: m[2] || undefined, open: m[3] || undefined });
+      history.replaceState(null, '', window.location.pathname + window.location.search);
+    };
+    fromHash();
+    window.addEventListener('hashchange', fromHash);
+    return () => window.removeEventListener('hashchange', fromHash);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  const closeGuide = () => { setGuide(false); try { localStorage.setItem(guideKey, '1'); } catch { /* private window */ } };
   const [, tick] = useState(0);
   useEffect(() => { const i = setInterval(() => tick((x) => x + 1), 30000); return () => clearInterval(i); }, []);
   const cleared = me.clearedUntil && new Date(me.clearedUntil) > new Date();
@@ -310,6 +327,7 @@ function Main({ me, reload }) {
       <div className="top">
         <div className="brand">🔐 Fit-Rend-Base</div>
         {cleared ? <span className="pill ok">Cleared · {mins} min</span> : <button className="pill warn" onClick={run(async () => { if (await clearanceAsk()) reload(); })}>🔐 Clearance check</button>}
+        <button className="pill ok" onClick={() => setGuide(Date.now())}>🧭 Guide</button>
         <button className="pill" onClick={() => setAcct(true)}>{me.name || me.username}</button>
         <button className="pill" onClick={run(async () => { await api('logout'); reload(); })}>Sign out</button>
       </div>
@@ -319,17 +337,17 @@ function Main({ me, reload }) {
       <div className="small muted">Your clearance in {SECTION_NAMES[tab]}: <b>{LEVEL_NAMES[lvl]}</b></div>
       {lvl === 'none' ? (
         <div className="card center" style={{ textAlign: 'center' }}><div className="lock">🔒</div><h2>{OWNER_ONLY.includes(tab) ? 'Owner only' : 'No clearance'}</h2><p className="muted">{OWNER_ONLY.includes(tab) ? `Only the owner goes into the ${SECTION_NAMES[tab]}.` : `You don't have clearance for ${SECTION_NAMES[tab]}. Ask an Admin to give you access.`}</p></div>
-      ) : tab === 'repos' ? <Repos /> : tab === 'deploys' ? (!rendIn ? <RendDoor reload={reload} /> : (
+      ) : tab === 'repos' ? <Repos key={nav.n} startNew={nav.open === 'new'} /> : tab === 'deploys' ? (!rendIn ? <RendDoor reload={reload} /> : (
         <>
           <div className="row" style={{ marginTop: 8 }}><span className="pill ok">🚪 Rend room open · {rmins} min</span><button className="pill" onClick={run(async () => { await api('rendClose'); reload(); })}>Lock the door</button></div>
-          <Deploys />
+          <Deploys key={nav.n} startNew={nav.open === 'new'} />
         </>
-      )) : tab === 'handover' ? <Handover /> : tab === 'database' ? <Database /> : tab === 'contacts' ? <Contacts me={me} /> : tab === 'connectors' ? <Connectors me={me} /> : <Admin me={me} />}
-      {acct && <Account me={me} close={() => setAcct(false)} reload={reload} />}
+      )) : tab === 'dns' ? <DnsRoom key={nav.n} startNew={nav.open === 'new'} /> : tab === 'handover' ? <Handover key={nav.n} startNew={nav.open === 'new'} /> : tab === 'database' ? <Database key={nav.n} startNew={nav.open === 'new'} /> : tab === 'contacts' ? <Contacts key={nav.n} me={me} start={nav.sub} /> : tab === 'connectors' ? <Connectors me={me} /> : <Admin key={nav.n} me={me} start={nav.sub} />}
+      {acct && <Account me={me} close={() => setAcct(false)} reload={reload} start={typeof acct === 'string' ? acct : null} />}
+      <Guide me={me} open={guide} onClose={closeGuide} go={go} />
     </div>
   );
 }
-
 function RendDoor({ reload }) {
   const [c, setC] = useState('');
   const go = run(async () => { await api('rendOpen', { code: c }); setC(''); reload(); });
@@ -343,7 +361,6 @@ function RendDoor({ reload }) {
     </form>
   );
 }
-
 /* ================= keys and values (shared) ================= */
 function Secrets({ scope, scopeId, title, canEdit, canAdmin }) {
   const [d, load, err] = useLoad(() => api('secretList', { scope, scopeId }), [scope, scopeId]);
@@ -383,12 +400,11 @@ function SecretRow({ x, scope, scopeId, canEdit, canAdmin, reload }) {
     </div>
   );
 }
-
 /* ================= repos ================= */
-function Repos() {
+function Repos({ startNew }) {
   const [d, load] = useLoad(() => api('repoList'), []);
   const [sel, setSel] = useState(null);
-  const [form, setForm] = useState(null);
+  const [form, setForm] = useState(startNew ? { name: '', description: '' } : null);
   if (sel) return <Repo repo={sel} back={() => { setSel(null); load(); }} />;
   return (
     <div>
@@ -554,13 +570,13 @@ function RepoSettings({ repo, canAdmin, back }) {
     </div>
   );
 }
-
 /* ================= deploys ================= */
 const VIS = { public: 'Anyone with the link', key: 'Only people with the key link', clearance: 'Only you (the owner, signed in)' };
-function Deploys() {
+function Deploys({ startNew }) {
   const [d, load] = useLoad(() => api('siteList'), []);
   const [repos] = useLoad(() => api('repoList').catch(() => ({ repos: [] })), []);
-  const [form, setForm] = useState(null);
+  const [form, setForm] = useState(startNew ? { slug: '', repoId: '', folder: '', visibility: 'clearance' } : null);
+  useEffect(() => { if (form && !form.repoId && repos?.repos?.[0]) setForm((f) => ({ ...f, repoId: repos.repos[0].id })); }, [repos, form]);
   const [open, setOpen] = useState(null);
   return (
     <div>
@@ -631,12 +647,11 @@ function Site({ site, reload, open, toggle }) {
     </div>
   );
 }
-
 /* ================= database ================= */
-function Database() {
+function Database({ startNew }) {
   const [d, load] = useLoad(() => api('projectList'), []);
   const [sel, setSel] = useState(null);
-  const [form, setForm] = useState(null);
+  const [form, setForm] = useState(startNew ? { slug: '', name: '' } : null);
   if (sel) return <Project p={sel} base={d.base} back={() => { setSel(null); load(); }} />;
   return (
     <div>
@@ -827,7 +842,6 @@ function ProjectSettings({ p, canAdmin, back }) {
     </div>
   );
 }
-
 /* ================= connectors ================= */
 function Connectors({ me }) {
   const lvl = me.levels.connectors;
@@ -885,10 +899,9 @@ function Connectors({ me }) {
     </div>
   );
 }
-
 /* ================= contacts and email campaigns ================= */
-function Contacts({ me }) {
-  const [view, setView] = useState('people');
+function Contacts({ me, start }) {
+  const [view, setView] = useState(['people', 'campaigns', 'link'].includes(start) ? start : 'people');
   const lvl = me.levels.contacts;
   return (
     <div>
@@ -1104,11 +1117,97 @@ function CrmLink({ lvl }) {
     </div>
   );
 }
-
 /* ================= handover room ================= */
-function Handover() {
+/* DNS room: show a Rend site on your own domain, in 2 steps.
+   1. Type your domain and pick the site.  2. Copy one record to your domain company, then Check it. */
+const DOMAIN_COMPANIES = [
+  ['GoDaddy', 'https://dcc.godaddy.com/control/portfolio'],
+  ['Namecheap', 'https://ap.www.namecheap.com/domains/list/'],
+  ['Cloudflare', 'https://dash.cloudflare.com/'],
+  ['Squarespace', 'https://account.squarespace.com/domains'],
+];
+function recordFor(name, ip) {
+  const parts = String(name).split('.');
+  return { type: 'A', name: parts.length <= 2 ? '@' : parts.slice(0, -2).join('.'), value: ip };
+}
+function DnsRecord({ name, ip }) {
+  const rec = recordFor(name, ip);
+  return (
+    <div className="list">
+      {[['Type', rec.type], ['Name (Host)', rec.name], ['Value (Points to)', rec.value || 'unknown']].map(([k, v]) => (
+        <div className="item" key={k}><span className="grow"><span className="small muted">{k}</span><br /><b style={{ fontSize: 18 }}>{v}</b></span><button onClick={() => copy(v)}>Copy</button></div>
+      ))}
+    </div>
+  );
+}
+function DnsRoom({ startNew }) {
+  const [d, load] = useLoad(() => api('dnsList'), []);
+  const [step, setStep] = useState(startNew ? 1 : 0);
+  const [f, setF] = useState({ name: '', siteId: '' });
+  const [added, setAdded] = useState(null);
+  const [res, setRes] = useState({});
+  const sites = d?.sites || [];
+  const check = (x) => run(async () => { const o = await api('dnsCheck', { id: x.id }); setRes((v) => ({ ...v, [x.id]: o })); load(); })();
+  const start = () => { setF({ name: '', siteId: sites.length === 1 ? sites[0].id : '' }); setAdded(null); setStep(1); };
+  const picked = sites.find((x) => String(x.id) === String(f.siteId));
+  const cur = added && (res[added.id] || null);
+  return (
+    <div>
+      <div className="row"><h2 className="grow">DNS room · Your own domain</h2>{step === 0 && <button className="primary" onClick={start}>Use my own domain</button>}</div>
+      <p className="small muted">Show a site from the Rend room on a domain you bought, like mysite.com. Free https is set up for you. Two steps.</p>
+      {step === 1 && (
+        <div className="card">
+          <div className="small muted">Step 1 of 2</div>
+          <h3>What is your domain, and which site should it show?</h3>
+          <Field label="Your domain"><input value={f.name} onChange={(e) => setF({ ...f, name: e.target.value })} placeholder="mysite.com" autoCapitalize="none" inputMode="url" /></Field>
+          {!sites.length ? <p className="muted">You have no sites yet. Make one in the Rend room first.</p> : (
+            <div>
+              <label>Which site</label>
+              {sites.map((x) => <button key={x.id} className={'big' + (String(f.siteId) === String(x.id) ? ' primary' : '')} style={{ display: 'block', width: '100%', textAlign: 'left', margin: '6px 0', padding: '12px' }} onClick={() => setF({ ...f, siteId: x.id })}>🌐 {x.slug}<span className="small muted"> · {VIS[x.visibility] || x.visibility}</span></button>)}
+            </div>
+          )}
+          {picked && picked.visibility !== 'public' && <p className="small" style={{ color: 'var(--warn)' }}>This site is set to "{VIS[picked.visibility]}". Only sites set to "Anyone with the link" show on your own domain. You can change it in the Rend room.</p>}
+          <p className="row"><button className="primary" disabled={!f.name || !f.siteId} onClick={run(async () => { const o = await api('dnsAdd', f); setAdded({ id: o.id, name: o.name }); setStep(2); load(); })}>Next</button><button onClick={() => setStep(0)}>Cancel</button></p>
+        </div>
+      )}
+      {step === 2 && added && (
+        <div className="card">
+          <div className="small muted">Step 2 of 2</div>
+          <h3>Add this one record where you bought {added.name}</h3>
+          <p className="small muted">Open your domain company, go to DNS for {added.name}, and add a record with these 3 boxes. If there is already an A record with the same name, change it to this value.</p>
+          <DnsRecord name={added.name} ip={d?.serverIp} />
+          <div className="row" style={{ flexWrap: 'wrap', margin: '10px 0' }}>{DOMAIN_COMPANIES.map(([n, u]) => <a key={n} href={u} target="_blank" rel="noopener noreferrer"><button>{n}</button></a>)}</div>
+          <p className="small muted">On Cloudflare, set the cloud to grey (DNS only).</p>
+          <p className="row"><button className="primary" onClick={() => check(added)}>Check it</button><button onClick={() => { setStep(0); setAdded(null); }}>Done for now</button></p>
+          {cur && (cur.ok
+            ? <p>✅ {added.name} points here. Open <a href={'https://' + added.name} target="_blank" rel="noopener noreferrer">https://{added.name}</a>. The first visit can take a minute while https is set up.</p>
+            : <p>⏳ Not yet. {cur.ips?.length ? `It points to ${cur.ips.join(', ')} now.` : 'No record found yet.'} Changes can take a few minutes, sometimes a few hours. Tap Check it again later.</p>)}
+        </div>
+      )}
+      {(d?.items || []).length > 0 && (
+        <div className="card">
+          <h3>Your domains</h3>
+          <div className="list">
+            {d.items.map((x) => (
+              <div className="item" key={x.id}>
+                <span className="grow"><b>{x.points_here ? '✅' : '⏳'} {x.name}</b><br /><span className="small muted">shows {x.slug || 'a deleted site'}{x.visibility && x.visibility !== 'public' ? ' (private, set it to Anyone with the link)' : ''} · {x.checked_at ? 'checked ' + when(x.checked_at) : 'not checked yet'}</span>
+                  {res[x.id] && !res[x.id].ok && <><br /><span className="small muted">Add this record: A, {recordFor(x.name, d.serverIp).name}, {d.serverIp}</span></>}
+                </span>
+                {x.points_here && <a href={'https://' + x.name} target="_blank" rel="noopener noreferrer"><button>Open</button></a>}
+                <button onClick={() => check(x)}>Check it</button>
+                <button className="danger" onClick={run(async () => { if (!confirm(`Remove ${x.name}? The domain stops showing your site.`)) return; await api('dnsDelete', { id: x.id }); load(); })}>Remove</button>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+      {d && !d.items.length && step === 0 && <div className="muted">No domains yet. Tap Use my own domain to start.</div>}
+    </div>
+  );
+}
+function Handover({ startNew }) {
   const [d, load] = useLoad(() => api('handoverList'), []);
-  const [f, setF] = useState(null);
+  const [f, setF] = useState(startNew ? { app: '', name: '', note: '', value: '' } : null);
   const groups = {};
   (d?.items || []).forEach((x) => { (groups[x.app] = groups[x.app] || []).push(x); });
   return (
@@ -1151,7 +1250,6 @@ function HandoverRow({ x, canEdit, canAdmin, reload }) {
     </div>
   );
 }
-
 /* ================= AI access ================= */
 const AI_LEVELS = {
   repos: { none: 'No access', viewer: 'Read files', developer: 'Read and save files' },
@@ -1214,11 +1312,10 @@ function AiAccess() {
     </div>
   );
 }
-
 /* ================= admin ================= */
-function Admin({ me }) {
-  const [view, setView] = useState('users');
+function Admin({ me, start }) {
   const views = [['users', 'Users'], ['grants', 'Access to one item'], ['audit', 'Activity log'], ...(me.owner ? [['ai', 'AI access'], ['settings', 'Settings'], ['backups', 'Backups']] : [])];
+  const [view, setView] = useState(views.some(([v]) => v === start) ? start : 'users');
   return (
     <div>
       <div className="tabs">{views.map(([v, n]) => <button key={v} className={view === v ? 'on' : ''} onClick={() => setView(v)}>{n}</button>)}</div>
@@ -1259,104 +1356,4 @@ function Users({ me }) {
           <p className="row"><button className="primary" onClick={run(async () => { const r = await api('userCreate', f); setTemp({ user: f.username, pw: r.tempPassword }); setF(null); load(); })}>Add user</button><button onClick={() => setF(null)}>Cancel</button></p>
         </div>
       )}
-      {temp && <Modal onClose={() => setTemp(null)}><h3>Temporary password for {temp.user}</h3><p className="mono card">{temp.pw}</p><p className="small muted">Give it to them in person or by a safe way. They must pick a new one and turn on 2-step when they sign in.</p><p className="row"><button onClick={() => copy(temp.pw)}>Copy</button><button className="primary" onClick={() => setTemp(null)}>Done</button></p></Modal>}
-      <div className="list">
-        {(d?.users || []).map((u) => (
-          <div key={u.id} style={{ display: 'block' }}>
-            <div className="row"><b className="grow">{u.username}</b>{u.is_owner && <span className="pill ok">Owner</span>}{u.disabled && <span className="pill bad">Off</span>}
-              {u.locked_until && new Date(u.locked_until) > new Date() && <span className="pill bad">Locked</span>}
-              <span className={'pill ' + (u.totp_on ? 'ok' : 'warn')}>2-step {u.totp_on ? 'on' : 'off'}</span>
-              {canAdmin && !u.is_owner && <button onClick={() => setEdit(edit?.id === u.id ? null : { id: u.id, levels: u.levels || {} })}>Edit</button>}</div>
-            <div className="small muted">{u.is_owner ? 'Everything' : Object.entries(u.levels || {}).filter(([k]) => !OWNER_ONLY.includes(k)).map(([k, v]) => `${SECTION_NAMES[k]}: ${LEVEL_NAMES[v]}`).join(' · ') || 'No section access'} · last active {u.last_seen ? when(u.last_seen) : 'never'}</div>
-            {edit?.id === u.id && (
-              <div className="card">
-                <LevelPicker levels={edit.levels} onChange={(levels) => setEdit({ ...edit, levels })} />
-                <p className="row">
-                  <button className="primary" onClick={run(async () => { await api('userUpdate', { userId: u.id, levels: edit.levels }); toast('Saved'); setEdit(null); load(); })}>Save levels</button>
-                  <button onClick={run(async () => { const r = await api('userUpdate', { userId: u.id, resetPassword: true }); setTemp({ user: u.username, pw: r.tempPassword }); load(); })}>New temp password</button>
-                  {u.totp_on && <button onClick={run(async () => { if (confirm('Reset 2-step for ' + u.username + '? They set it up again.')) { await api('userUpdate', { userId: u.id, reset2fa: true }); load(); } })}>Reset 2-step</button>}
-                  {u.locked_until && <button onClick={run(async () => { await api('userUpdate', { userId: u.id, unlock: true }); load(); })}>Unlock</button>}
-                  <button className="danger" onClick={run(async () => { await api('userUpdate', { userId: u.id, disabled: !u.disabled }); load(); })}>{u.disabled ? 'Turn on' : 'Turn off'}</button>
-                </p>
-              </div>
-            )}
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-}
-function Grants({ me }) {
-  const [d, load] = useLoad(() => api('userList'), []);
-  const [items] = useLoad(async () => {
-    const [r, p] = await Promise.all([api('repoList').catch(() => ({ repos: [] })), api('projectList').catch(() => ({ projects: [] }))]);
-    return { repo: r.repos.map((x) => [x.id, x.name]), project: p.projects.map((x) => [x.id, x.slug]) };
-  }, []);
-  const [f, setF] = useState({ userId: '', kind: 'repo', resourceId: '', level: 'viewer' });
-  const canAdmin = atLeast(me.levels.admin, 'admin');
-  return (
-    <div>
-      <h2>Access to one item</h2>
-      <p className="small muted">Give someone clearance on one repo or database project without opening the whole room. The Rend room stays owner-only.</p>
-      {canAdmin && (
-        <div className="card row">
-          <select value={f.userId} onChange={(e) => setF({ ...f, userId: e.target.value })} style={{ width: 'auto' }}><option value="">Person</option>{(d?.users || []).filter((u) => !u.is_owner).map((u) => <option key={u.id} value={u.id}>{u.username}</option>)}</select>
-          <select value={f.kind} onChange={(e) => setF({ ...f, kind: e.target.value, resourceId: '' })} style={{ width: 'auto' }}><option value="repo">Repo (Fit room)</option><option value="project">Database project (Base room)</option></select>
-          <select value={f.resourceId} onChange={(e) => setF({ ...f, resourceId: e.target.value })} style={{ width: 'auto' }}><option value="">Item</option>{(items?.[f.kind] || []).map(([id, n]) => <option key={id} value={id}>{n}</option>)}</select>
-          <select value={f.level} onChange={(e) => setF({ ...f, level: e.target.value })} style={{ width: 'auto' }}>{['viewer', 'developer', 'admin'].map((l) => <option key={l} value={l}>{LEVEL_NAMES[l]}</option>)}</select>
-          <button className="primary" onClick={run(async () => { await api('grantSet', { ...f, userId: Number(f.userId), resourceId: Number(f.resourceId) }); toast('Saved'); load(); })}>Give access</button>
-        </div>
-      )}
-      <div className="list">
-        {(d?.grants || []).map((g) => {
-          const u = (d.users || []).find((x) => x.id === Number(g.user_id));
-          return <div key={g.id}><span className="grow">{u?.username} · {g.kind} <b>{g.resource_name || '#' + g.resource_id}</b> · {LEVEL_NAMES[g.level]}</span>
-            {canAdmin && <button className="danger" onClick={run(async () => { await api('grantDelete', { id: g.id }); load(); })}>Remove</button>}</div>;
-        })}
-        {d && !d.grants.length && <div className="muted small">None yet.</div>}
-      </div>
-    </div>
-  );
-}
-function Audit() {
-  const [search, setSearch] = useState('');
-  const [d, load] = useLoad(() => api('auditList', { search }), [search]);
-  return (
-    <div>
-      <div className="row"><h2 className="grow">Activity log</h2><input placeholder="Search" value={search} onChange={(e) => setSearch(e.target.value)} style={{ maxWidth: 240 }} /><button onClick={load}>Refresh</button></div>
-      <div className="tbl"><table><thead><tr><th>When</th><th>Who</th><th>What</th><th>Details</th><th>From</th></tr></thead>
-        <tbody>{(d?.audit || []).map((a) => <tr key={a.id}><td>{when(a.at)}</td><td>{a.username}</td><td>{a.action}</td><td title={a.detail}>{a.detail}</td><td>{a.ip}</td></tr>)}</tbody></table></div>
-    </div>
-  );
-}
-function Settings() {
-  const [d] = useLoad(() => api('settingsGet'), []);
-  const [f, setF] = useState(null);
-  useEffect(() => { if (d) setF(d.settings); }, [d]);
-  if (!f) return null;
-  return (
-    <div className="card">
-      <h2>Settings</h2>
-      <Field label="Sign out after this many idle minutes (5 to 240)"><input type="number" value={f.idleMinutes} onChange={(e) => setF({ ...f, idleMinutes: e.target.value })} /></Field>
-      <Field label="A clearance check lasts this many minutes (1 to 60)"><input type="number" value={f.clearanceMinutes} onChange={(e) => setF({ ...f, clearanceMinutes: e.target.value })} /></Field>
-      <label className="row"><input type="checkbox" checked={f.require2fa} onChange={(e) => setF({ ...f, require2fa: e.target.checked })} style={{ width: 'auto' }} /> Everyone must use 2-step sign-in</label>
-      <p><button className="primary" onClick={run(async () => { await api('settingsSet', f); toast('Saved'); })}>Save settings</button></p>
-      <h3>Last app update</h3>
-      <p className="small muted">The server checks your GitHub repo every 5 minutes and updates itself when you upload new files.</p>
-      <div className="mono small" style={{ whiteSpace: 'pre-wrap' }}>{d.update || 'No update has run yet.'}</div>
-    </div>
-  );
-}
-function Backups() {
-  const [d, load] = useLoad(() => api('backupList'), []);
-  return (
-    <div>
-      <div className="row"><h2 className="grow">Backups</h2><button className="primary" onClick={run(async () => { await api('backupNow'); toast('Backup starts within a minute'); setTimeout(load, 70000); })}>Back up now</button><button onClick={load}>Refresh</button></div>
-      <p className="small muted">The server makes a backup every day and keeps the last 7. Download copies to keep them somewhere else too. db files are all databases, files are all repo files.</p>
-      <div className="list">
-        {(d?.files || []).map((f) => <div key={f.name}><span className="mono grow">{f.name}</span><span className="small muted">{size(f.size)}</span><a href={`/api/get?what=backup&file=${encodeURIComponent(f.name)}`}><button>Download</button></a></div>)}
-        {d && !d.files.length && <div className="muted small">No backups yet.</div>}
-      </div>
-    </div>
-  );
-}
+      {temp && <Modal onClose={() => setTemp(null)}><h3>Temporary password for {temp.user}</h3><p className="mono card">{temp.pw}</p><p className="small muted">Give it to them in person or by a safe way. They must pick a new one and turn on 2-step when they sign in.</p><p class
