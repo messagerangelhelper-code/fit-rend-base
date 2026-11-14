@@ -33,5 +33,6 @@ export function middleware(req) {
   if (pathname.startsWith('/api/pub')) return new NextResponse('Not found', { status: 404 });
   return NextResponse.next();
 }
+
 // Every address goes through here, so a custom domain can never reach the sign-in or the rooms.
 export const config = { matcher: ['/:path*'] };

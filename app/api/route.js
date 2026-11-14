@@ -9,6 +9,7 @@ import {
 import * as P from '../../lib/projects';
 import * as CRM from '../../lib/crm';
 import crypto from 'crypto';
+import { promises as dns } from 'dns';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -813,6 +814,44 @@ const MAIN = {
     if (r.rows[0]) await audit(s, 'handover.delete', `${r.rows[0].app}: ${r.rows[0].name}`, ipOf(req));
     return { ok: true };
   },
+  /* ---- DNS room: your own domain for a Rend site, in 2 steps ---- */
+  async dnsList({ req, s }) {
+    if (!s.is_owner) fail(403, 'OWNER_ONLY', 'Only the owner goes into the DNS room.');
+    const r = await q('select d.id, d.name, d.site_id, d.points_here, d.seen_ips, d.checked_at, d.created_at, s.slug, s.visibility from aio.domains d left join aio.sites s on s.id = d.site_id order by d.name');
+    const sites = await q('select id, slug, visibility from aio.sites order by slug');
+    return { items: r.rows, sites: sites.rows, serverIp: await serverIp(req) };
+  },
+  async dnsAdd({ req, s, body }) {
+    if (!s.is_owner) fail(403, 'OWNER_ONLY', 'Only the owner goes into the DNS room.');
+    needCleared(s);
+    const name = cleanDomain(body.name);
+    const own = hostName(req);
+    if (name === own || name.endsWith('.sslip.io') || name.endsWith('.nip.io')) fail(400, 'BAD', 'That is this server\'s own address. Type a domain you bought, like mysite.com.');
+    const site = await q('select id, slug from aio.sites where id = $1', [body.siteId]);
+    if (!site.rows[0]) fail(400, 'BAD', 'Pick which site this domain should show.');
+    const r = await q('insert into aio.domains (name, site_id, created_by) values ($1,$2,$3) on conflict (name) do nothing returning id', [name, site.rows[0].id, s.username]);
+    if (!r.rows[0]) fail(400, 'BAD', 'That domain is already in the DNS room.');
+    await audit(s, 'dns.add', `${name} to ${site.rows[0].slug}`, ipOf(req));
+    return { id: r.rows[0].id, name, record: dnsRecord(name, await serverIp(req)) };
+  },
+  async dnsCheck({ req, s, body }) {
+    if (!s.is_owner) fail(403, 'OWNER_ONLY', 'Only the owner goes into the DNS room.');
+    const r = await q('select id, name from aio.domains where id = $1', [body.id]);
+    if (!r.rows[0]) fail(404, 'NOTFOUND', 'Domain not found');
+    const want = await serverIp(req);
+    let ips = [];
+    try { ips = await dns.resolve4(r.rows[0].name); } catch {}
+    const ok = !!want && ips.includes(want);
+    await q('update aio.domains set points_here = $2, seen_ips = $3, checked_at = now() where id = $1', [body.id, ok, ips.join(', ')]);
+    return { ok, ips, serverIp: want };
+  },
+  async dnsDelete({ req, s, body }) {
+    if (!s.is_owner) fail(403, 'OWNER_ONLY', 'Only the owner goes into the DNS room.');
+    needCleared(s);
+    const r = await q('delete from aio.domains where id = $1 returning name', [body.id]);
+    if (r.rows[0]) await audit(s, 'dns.delete', r.rows[0].name, ipOf(req));
+    return { ok: true };
+  },
   /* ---- AI access: keys that only reach the Fit room and the Base room ---- */
   async aiKeyList({ s }) {
     if (!s.is_owner) fail(403, 'OWNER_ONLY', 'Only the owner can manage AI access.');
@@ -1001,6 +1040,27 @@ const MAIN = {
     return { ok: true };
   },
 };
+
+/* ---- DNS room helpers ---- */
+const DOMAIN = /^(?=.{4,253}$)([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/;
+function cleanDomain(v) {
+  const d = String(v || '').trim().toLowerCase().replace(/^https?:\/\//, '').replace(/\/.*$/, '').replace(/\.$/, '');
+  if (!DOMAIN.test(d)) fail(400, 'BAD', 'Type just the domain, like mysite.com or shop.mysite.com.');
+  return d;
+}
+// The address your domain should point to: this server's own public IP.
+async function serverIp(req) {
+  if (process.env.SERVER_IP) return process.env.SERVER_IP;
+  const host = hostName(req);
+  const m = host.match(/^(\d{1,3})-(\d{1,3})-(\d{1,3})-(\d{1,3})\.(sslip|nip)\.io$/);
+  if (m) return m.slice(1, 5).join('.');
+  if (/^\d{1,3}(\.\d{1,3}){3}$/.test(host)) return host;
+  try { return (await dns.lookup(host, { family: 4 })).address; } catch { return ''; }
+}
+function dnsRecord(name, ip) {
+  const parts = name.split('.');
+  return { type: 'A', name: parts.length <= 2 ? '@' : parts.slice(0, -2).join('.'), value: ip };
+}
 
 async function commitOf(repoId, commitId) {
   const r = await q('select * from aio.commits where id = $1 and repo_id = $2', [commitId, repoId]);
