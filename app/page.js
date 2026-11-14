@@ -290,9 +290,12 @@ function Account({ me, close, reload, start = null }) {
 }
 
 function Main({ me, reload }) {
-  const tabs = Object.keys(SECTION_NAMES);
+  // A customer sees only their own space: My space, their code (Fit room) and their database (Base room).
+  const tabs = me.customer ? ['home', 'repos', 'database'] : Object.keys(SECTION_NAMES);
+  const tabName = (x) => (x === 'home' ? 'My space' : SECTION_NAMES[x]);
   // nav: which room, which part of it, and a form to open. Links like /#/contacts/link or /#/repos//new open it too.
-  const [nav, setNav] = useState(() => ({ tab: tabs.find((x) => me.levels[x] !== 'none') || 'repos', n: 0 }));
+  const [nav, setNav] = useState(() => ({ tab: me.customer ? 'home' : tabs.find((x) => me.levels[x] !== 'none') || 'repos', n: 0 }));
+  const [help, setHelp] = useState(false);
   const tab = nav.tab;
   const setTab = (x) => setNav((v) => ({ tab: x, n: v.n + 1 }));
   const [acct, setAcct] = useState(false);
@@ -320,7 +323,7 @@ function Main({ me, reload }) {
   useEffect(() => { const i = setInterval(() => tick((x) => x + 1), 30000); return () => clearInterval(i); }, []);
   const cleared = me.clearedUntil && new Date(me.clearedUntil) > new Date();
   const mins = cleared ? Math.ceil((new Date(me.clearedUntil) - new Date()) / 60000) : 0;
-  const lvl = me.levels[tab];
+  const lvl = tab === 'home' ? 'owner' : me.levels[tab];
   const rendIn = me.rendUntil && new Date(me.rendUntil) > new Date();
   const rmins = rendIn ? Math.ceil((new Date(me.rendUntil) - new Date()) / 60000) : 0;
   // The Rend room door locks behind you when you leave it.
@@ -335,14 +338,15 @@ function Main({ me, reload }) {
         <div className="brand">🔐 Fit-Rend-Base</div>
         {cleared ? <span className="pill ok">Cleared · {mins} min</span> : <button className="pill warn" onClick={run(async () => { if (await clearanceAsk()) reload(); })}>🔐 Clearance check</button>}
         <button className="pill ok" onClick={() => setGuide(Date.now())}>🧭 Guide</button>
+        <button className="pill warn" onClick={() => setHelp(true)}>🆘 Get help</button>
         <button className="pill" onClick={() => setAcct(true)}>{me.name || me.username}</button>
         <button className="pill" onClick={run(async () => { await api('logout'); reload(); })}>Sign out</button>
       </div>
       <div className="tabs">
-        {tabs.map((x) => <button key={x} className={tab === x ? 'on' : ''} onClick={() => setTab(x)}>{me.levels[x] === 'none' || (x === 'deploys' && !rendIn) ? '🔒 ' : ''}{SECTION_NAMES[x]}</button>)}
+        {tabs.map((x) => <button key={x} className={tab === x ? 'on' : ''} onClick={() => setTab(x)}>{x !== 'home' && (me.levels[x] === 'none' || (x === 'deploys' && !rendIn)) ? '🔒 ' : ''}{tabName(x)}</button>)}
       </div>
-      <div className="small muted">Your clearance in {SECTION_NAMES[tab]}: <b>{LEVEL_NAMES[lvl]}</b></div>
-      {lvl === 'none' ? (
+      {tab !== 'home' && <div className="small muted">Your clearance in {SECTION_NAMES[tab]}: <b>{LEVEL_NAMES[lvl]}</b></div>}
+      {tab === 'home' ? <MyHome key={nav.n} me={me} go={go} reload={reload} /> : lvl === 'none' ? (
         <div className="card center" style={{ textAlign: 'center' }}><div className="lock">🔒</div><h2>{OWNER_ONLY.includes(tab) ? 'Owner only' : 'No clearance'}</h2><p className="muted">{OWNER_ONLY.includes(tab) ? `Only the owner goes into the ${SECTION_NAMES[tab]}.` : `You don't have clearance for ${SECTION_NAMES[tab]}. Ask an Admin to give you access.`}</p></div>
       ) : tab === 'repos' ? <Repos key={nav.n} startNew={nav.open === 'new'} /> : tab === 'deploys' ? (!rendIn ? <RendDoor reload={reload} /> : (
         <>
@@ -352,6 +356,226 @@ function Main({ me, reload }) {
       )) : tab === 'dns' ? <DnsRoom key={nav.n} startNew={nav.open === 'new'} /> : tab === 'handover' ? <Handover key={nav.n} startNew={nav.open === 'new'} /> : tab === 'database' ? <Database key={nav.n} startNew={nav.open === 'new'} /> : tab === 'contacts' ? <Contacts key={nav.n} me={me} start={nav.sub} /> : tab === 'connectors' ? <Connectors me={me} /> : <Admin key={nav.n} me={me} start={nav.sub} />}
       {acct && <Account me={me} close={() => setAcct(false)} reload={reload} start={typeof acct === 'string' ? acct : null} />}
       <Guide me={me} open={guide} onClose={closeGuide} go={go} />
+      {help && <GetHelp room={tabName(tab)} close={() => setHelp(false)} />}
+    </div>
+  );
+}
+
+/* ================= customer pipeline ================= */
+// Get help: the problem becomes a request that says which room the person was in.
+function GetHelp({ room, close }) {
+  const [msg, setMsg] = useState('');
+  const [sent, setSent] = useState(false);
+  const [d, load] = useLoad(() => api('myHome'), []);
+  return (
+    <Modal onClose={close}>
+      <h2>🆘 Get help</h2>
+      {sent ? <p>Got it. Your request is in, and the answer shows up right here and on My space.</p> : (
+        <>
+          <p className="small muted">You are in: <b>{room}</b>. We send that with your request, so you don't have to explain where you were.</p>
+          <label>What went wrong, or what are you trying to do?</label>
+          <textarea value={msg} onChange={(e) => setMsg(e.target.value)} placeholder="Example: I pressed Save and nothing happened" style={{ minHeight: 110 }} />
+          <p className="small muted">Tip: tap the 🎤 on your phone's keyboard to say it out loud.</p>
+        </>
+      )}
+      <div className="row">
+        {!sent && <button className="primary" disabled={msg.trim().length < 3} onClick={run(async () => { await api('ticketOpen', { room, message: msg }); setSent(true); setMsg(''); load(); })}>Send my request</button>}
+        <button onClick={close}>Close</button>
+      </div>
+      {d && d.tickets.length > 0 && <MyTickets tickets={d.tickets} />}
+    </Modal>
+  );
+}
+function MyTickets({ tickets }) {
+  return (
+    <div>
+      <h3>Your requests</h3>
+      <div className="list">
+        {tickets.map((t) => (
+          <div key={t.id}><span className="grow"><b>{t.message.slice(0, 120)}</b><br /><span className="small muted">{t.room} · {when(t.created_at)}</span>
+            {t.reply && <><br /><span className="small">💬 {t.reply}</span></>}</span>
+          <span className={'pill ' + (t.status === 'open' ? 'warn' : 'ok')}>{t.status === 'open' ? 'Waiting' : 'Answered'}</span></div>
+        ))}
+      </div>
+    </div>
+  );
+}
+// A customer's home screen: their plan, their code spaces and databases, their share link and their help requests.
+function MyHome({ me, go, reload }) {
+  const [d, load] = useLoad(() => api('myHome'), []);
+  const [name, setName] = useState('');
+  if (!d) return <div className="muted">Loading…</div>;
+  if (!d.customer) return <div className="card">This screen is for customer accounts. Use the rooms above.</div>;
+  const room = (n, used, lim) => `${used} of ${lim} ${n}`;
+  return (
+    <div>
+      <div className="card">
+        <h2>Welcome{me.name ? ', ' + me.name.split(' ')[0] : ''} 👋</h2>
+        <p className="muted small">Your plan: <b>{d.planName || 'None'}</b>{d.plan === 'cancelled' ? '. Your plan ended, so you can open your things but not make new ones.' : ''}</p>
+        {d.plan === 'own' && <p className="small">Your Own Server License code is on its way from us. Your code space here is for trying it out.</p>}
+      </div>
+      <div className="card">
+        <h3>1. Your code ({room('code spaces', d.used.repos, d.limits.repos)})</h3>
+        <div className="list">{d.repos.map((r) => <div key={r.id} className="click" onClick={() => go({ tab: 'repos' })}><span className="grow"><b>{r.name}</b></span><span className="pill">Open</span></div>)}</div>
+        {d.used.repos < d.limits.repos && (
+          <div className="row"><input className="grow" placeholder="Name it, like shop" value={name} onChange={(e) => setName(e.target.value)} />
+            <button className="primary" onClick={run(async () => { await api('myRepoCreate', { name: name || 'app' }); setName(''); toast('Your code space is ready'); load(); })}>Make my code space</button></div>
+        )}
+      </div>
+      <div className="card">
+        <h3>2. Your database ({room('databases', d.used.projects, d.limits.projects)})</h3>
+        <div className="list">{d.projects.map((p) => <div key={p.id} className="click" onClick={() => go({ tab: 'database' })}><span className="grow"><b>{p.name || p.slug}</b></span><span className="pill">Open</span></div>)}</div>
+        {d.used.projects < d.limits.projects && <div className="row"><button className="primary" onClick={run(async () => { await api('myProjectCreate', { name: 'data' }); toast('Your database is ready'); load(); reload(); })}>Make my database</button></div>}
+      </div>
+      {d.share && (
+        <div className="card">
+          <h3>🎁 Get a free month</h3>
+          <p className="small muted">Send your link to a friend. When they pay for a plan through it, you get a free month.</p>
+          <div className="row"><input className="grow" readOnly value={d.share.link} /><button onClick={() => copy(d.share.link)}>Copy my link</button></div>
+          <p className="small muted">{d.share.friends} friend{d.share.friends === 1 ? '' : 's'} joined · {d.share.given} free month{d.share.given === 1 ? '' : 's'} given</p>
+        </div>
+      )}
+      {d.tickets.length > 0 && <div className="card"><MyTickets tickets={d.tickets} /></div>}
+    </div>
+  );
+}
+// Contacts > Pipeline: everyone moves from left to right by themselves. You can also move someone by hand.
+function Pipeline({ lvl }) {
+  const canDev = atLeast(lvl, 'developer');
+  const [d, load] = useLoad(() => api('pipelineBoard'), []);
+  const [open, setOpen] = useState(null);
+  const move = (id, stage) => run(async () => { await api('contactStage', { id, stage }); load(); })();
+  if (!d) return <div className="muted">Loading…</div>;
+  const names = Object.fromEntries(d.columns.map((c) => [c.stage, c.name]));
+  return (
+    <div>
+      <h2>Pipeline</h2>
+      <p className="small muted">People move by themselves: a lead comes in, a payment makes them Paid, Get help makes them Needs help, and an answer moves them back.</p>
+      <div className="board">
+        {d.columns.map((c) => (
+          <div key={c.stage} className="col">
+            <div className="row"><b className="grow">{c.name}</b><span className="pill">{c.count}</span></div>
+            {c.people.map((p) => (
+              <div key={p.id} className="card click" onClick={() => setOpen(p.id)}>
+                <b>{p.name || p.email}</b>{p.name && <div className="small muted">{p.email}</div>}
+                {canDev && <select value={p.stage} onClick={(e) => e.stopPropagation()} onChange={(e) => move(p.id, e.target.value)} style={{ marginTop: 6 }}>{Object.entries(names).map(([k, n]) => <option key={k} value={k}>{n}</option>)}</select>}
+              </div>
+            ))}
+            {!c.count && <div className="small muted">Nobody here.</div>}
+          </div>
+        ))}
+      </div>
+      {open && <ContactView id={open} canDev={canDev} canAdmin={atLeast(lvl, 'admin')} close={() => { setOpen(null); load(); }} />}
+    </div>
+  );
+}
+// Contacts > Help requests: answer one and it closes.
+function HelpRequests({ lvl }) {
+  const canDev = atLeast(lvl, 'developer');
+  const [status, setStatus] = useState('open');
+  const [d, load] = useLoad(() => api('ticketList', { status }), [status]);
+  const [reply, setReply] = useState({});
+  return (
+    <div>
+      <div className="row"><h2 className="grow">Help requests {d && <span className="small muted">· {d.open} waiting</span>}</h2>
+        <button className={status === 'open' ? 'primary' : ''} onClick={() => setStatus('open')}>Waiting</button>
+        <button className={status === 'closed' ? 'primary' : ''} onClick={() => setStatus('closed')}>Answered</button></div>
+      {(d?.tickets || []).map((t) => (
+        <div key={t.id} className="card">
+          <div className="small muted">#{t.id} · {t.username}{t.email ? ' · ' + t.email : ''}{t.plan ? ' · ' + t.plan : ''} · {when(t.created_at)}</div>
+          <div className="small">Was in: <b>{t.room || 'unknown'}</b></div>
+          <p style={{ whiteSpace: 'pre-wrap' }}>{t.message}</p>
+          {t.status === 'closed' ? <p className="small">💬 {t.reply} <span className="muted">· {t.replied_by}</span></p> : canDev && (
+            <>
+              <textarea placeholder="Your answer. They see it in the app." value={reply[t.id] || ''} onChange={(e) => setReply({ ...reply, [t.id]: e.target.value })} />
+              <div className="row"><button className="primary" onClick={run(async () => { await api('ticketReply', { id: t.id, reply: reply[t.id] || '' }); toast('Answered'); load(); })}>Answer and close</button></div>
+            </>
+          )}
+        </div>
+      ))}
+      {d && !d.tickets.length && <div className="muted small">{status === 'open' ? 'No one is waiting for help.' : 'No answered requests yet.'}</div>}
+    </div>
+  );
+}
+// Admin > Customer pipeline (owner only): the switches. Everything starts off.
+function PipelineSettings() {
+  const [d, load] = useLoad(() => api('pipelineGet'), []);
+  const [c, loadC] = useLoad(() => api('customerList'), []);
+  const [whsec, setWhsec] = useState(''); const [key, setKey] = useState(''); const [coupon, setCoupon] = useState(null);
+  const [mails, setMails] = useState(null); const [testTo, setTestTo] = useState(''); const [link, setLink] = useState(null);
+  useEffect(() => { if (d && !mails) setMails(d.welcome); if (d && coupon === null) setCoupon(d.rewardCoupon || ''); }, [d]); // eslint-disable-line react-hooks/exhaustive-deps
+  if (!d) return <div className="muted">Loading…</div>;
+  const set = (patch, msg) => run(async () => { await api('pipelineSet', patch); toast(msg || 'Saved'); load(); })();
+  const Switch = ({ k, title, text }) => (
+    <div className="row" style={{ alignItems: 'flex-start', margin: '10px 0' }}>
+      <span className="grow"><b>{title}</b><br /><span className="small muted">{text}</span></span>
+      <button className={d[k] ? 'primary' : ''} onClick={() => set({ [k]: !d[k] }, d[k] ? 'Turned off' : 'Turned on')}>{d[k] ? 'On' : 'Off'}</button>
+    </div>
+  );
+  return (
+    <div>
+      <div className="card">
+        <h2>Step 1. Connect Stripe</h2>
+        <p className="small">In Stripe, add a webhook to this address, for the events <b>checkout.session.completed</b> and <b>customer.subscription.deleted</b>:</p>
+        <div className="row"><input className="grow" readOnly value={d.webhookUrl} /><button onClick={() => copy(d.webhookUrl)}>Copy</button></div>
+        <p className="small muted">Stripe then shows a signing secret that starts with whsec_. Paste it here. {d.hasWhsec ? '✅ Saved.' : 'Not saved yet.'}</p>
+        <div className="row"><input className="grow" type="password" placeholder="whsec_…" value={whsec} onChange={(e) => setWhsec(e.target.value)} /><button className="primary" disabled={!whsec} onClick={() => { set({ whsec }, 'Signing secret saved'); setWhsec(''); }}>Save</button></div>
+      </div>
+      <div className="card">
+        <h2>Step 2. Turn on what you want</h2>
+        <Switch k="accountsOn" title="Account after payment" text="A payment makes the customer's own sign-in. They sign in with their email and see only their own space." />
+        <Switch k="welcomeOn" title="Welcome emails" text="3 emails from your Gmail walk new customers through setup. Needs Contacts > Connection to LeadReplyRadar." />
+        <Switch k="rewardsOn" title="Share link rewards" text="Each customer gets a share link. A friend who pays through it earns them a free month." />
+        <p className="small muted">Payments from Stripe always move people to Paid on the pipeline board.</p>
+      </div>
+      {mails && (
+        <div className="card">
+          <h2>Welcome emails</h2>
+          <p className="small muted">You can use {'{{first_name}}'}, {'{{plan}}'}, {'{{signin_link}}'}, {'{{set_password_link}}'} and {'{{share_link}}'}. Every email gets your footer and an unsubscribe link.</p>
+          {mails.map((m, i) => (
+            <div key={i} className="box" style={{ marginBottom: 10 }}>
+              <div className="row"><b className="grow">Email {i + 1}</b><span className="small muted">Send</span><input type="number" min="0" max="30" value={m.delayDays} onChange={(e) => setMails(mails.map((x, j) => (j === i ? { ...x, delayDays: e.target.value } : x)))} style={{ width: 70 }} /><span className="small muted">days after payment</span></div>
+              <input value={m.subject} onChange={(e) => setMails(mails.map((x, j) => (j === i ? { ...x, subject: e.target.value } : x)))} />
+              <textarea value={m.body} onChange={(e) => setMails(mails.map((x, j) => (j === i ? { ...x, body: e.target.value } : x)))} style={{ minHeight: 160 }} />
+              <div className="row"><input className="grow" placeholder="Your own email, for a test" value={testTo} onChange={(e) => setTestTo(e.target.value)} />
+                <button onClick={run(async () => { await api('welcomeTest', { to: testTo, step: i }); toast('Test sent to ' + testTo); })}>Send me a test</button></div>
+            </div>
+          ))}
+          <div className="row"><button className="primary" onClick={() => set({ welcome: mails }, 'Welcome emails saved')}>Save the emails</button></div>
+          {Object.keys(d.welcomeCounts).length > 0 && <p className="small muted">So far: {Object.entries(d.welcomeCounts).map(([k, n]) => `${n} ${k}`).join(', ')}</p>}
+        </div>
+      )}
+      <div className="card">
+        <h2>Free months</h2>
+        <p className="small muted">Leave these empty and you give free months by hand in Stripe, then press Mark given below. To have it happen by itself, make a 100% off, once coupon in Stripe and a restricted key that can change subscriptions. {d.hasStripeKey ? '✅ Key saved.' : ''}</p>
+        <div className="row"><input className="grow" placeholder="Coupon ID, like FREEMONTH" value={coupon || ''} onChange={(e) => setCoupon(e.target.value)} /><button onClick={() => set({ rewardCoupon: coupon })}>Save coupon</button></div>
+        <div className="row"><input className="grow" type="password" placeholder="rk_live_…" value={key} onChange={(e) => setKey(e.target.value)} /><button className="primary" disabled={!key} onClick={() => { set({ stripeKey: key }, 'Key saved'); setKey(''); }}>Save key</button>{d.hasStripeKey && <button className="danger" onClick={() => set({ stripeKey: '' }, 'Key removed')}>Remove key</button>}</div>
+      </div>
+      <div className="card">
+        <h2>Customers {c && <span className="small muted">· {c.customers.length}</span>}</h2>
+        <div className="list">
+          {(c?.customers || []).map((u) => (
+            <div key={u.id}><span className="grow"><b>{u.name || u.email}</b> <span className="small muted">· {u.email} · {u.plan}{u.open_tickets ? ` · ${u.open_tickets} help waiting` : ''}</span><br />
+              <span className="small muted">{u.claimed ? 'Password set' : 'Has not set a password yet'} · since {when(u.created_at)}</span></span>
+              {!u.claimed && <button onClick={run(async () => { setLink(await api('customerLink', { userId: u.id })); })}>Get password link</button>}</div>
+          ))}
+          {c && !c.customers.length && <div className="small muted">No customers yet. They show up here after a payment, once Account after payment is on.</div>}
+        </div>
+        {link && <div className="box"><p className="small">Send this to {link.email}. It works once, for 7 days.</p><div className="row"><input className="grow" readOnly value={link.link} /><button onClick={() => copy(link.link)}>Copy</button></div></div>}
+      </div>
+      <div className="card">
+        <h2>Share link rewards {c && <span className="small muted">· {c.referrals.filter((r) => r.status !== 'given').length} owed</span>}</h2>
+        <div className="list">
+          {(c?.referrals || []).map((r) => (
+            <div key={r.id}><span className="grow"><b>{r.referrer_email || r.referrer}</b> <span className="small muted">brought {r.friend_email} · {when(r.created_at)}{r.note ? ' · ' + r.note : ''}</span></span>
+              {r.status === 'given' ? <span className="pill ok">Given</span> : <button onClick={run(async () => { await api('referralMark', { id: r.id }); loadC(); })}>Mark given</button>}</div>
+          ))}
+          {c && !c.referrals.length && <div className="small muted">No rewards yet.</div>}
+        </div>
+      </div>
+      {d.events.length > 0 && (
+        <div className="card"><h3>Latest from Stripe</h3><div className="list">{d.events.map((e) => <div key={e.id}><span className="grow small"><b>{e.type}</b> · {when(e.at)}<br /><span className="muted">{e.note}</span></span></div>)}</div></div>
+      )}
     </div>
   );
 }
@@ -915,12 +1139,14 @@ function Connectors({ me }) {
 
 /* ================= contacts and email campaigns ================= */
 function Contacts({ me, start }) {
-  const [view, setView] = useState(['people', 'campaigns', 'link'].includes(start) ? start : 'people');
+  const [view, setView] = useState(['people', 'pipeline', 'help', 'campaigns', 'link'].includes(start) ? start : 'people');
   const lvl = me.levels.contacts;
   return (
     <div>
-      <div className="tabs">{[['people', 'People'], ['campaigns', 'Email campaigns'], ['link', 'Connection']].map(([v, n]) => <button key={v} className={view === v ? 'on' : ''} onClick={() => setView(v)}>{n}</button>)}</div>
+      <div className="tabs">{[['people', 'People'], ['pipeline', 'Pipeline'], ['help', 'Help requests'], ['campaigns', 'Email campaigns'], ['link', 'Connection']].map(([v, n]) => <button key={v} className={view === v ? 'on' : ''} onClick={() => setView(v)}>{n}</button>)}</div>
       {view === 'people' && <People lvl={lvl} />}
+      {view === 'pipeline' && <Pipeline lvl={lvl} />}
+      {view === 'help' && <HelpRequests lvl={lvl} />}
       {view === 'campaigns' && <Campaigns lvl={lvl} me={me} />}
       {view === 'link' && <CrmLink lvl={lvl} />}
     </div>
@@ -1334,7 +1560,7 @@ function AiAccess() {
 
 /* ================= admin ================= */
 function Admin({ me, start }) {
-  const views = [['users', 'Users'], ['grants', 'Access to one item'], ['audit', 'Activity log'], ...(me.owner ? [['ai', 'AI access'], ['settings', 'Settings'], ['backups', 'Backups']] : [])];
+  const views = [['users', 'Users'], ['grants', 'Access to one item'], ['audit', 'Activity log'], ...(me.owner ? [['pipeline', 'Customer pipeline'], ['ai', 'AI access'], ['settings', 'Settings'], ['backups', 'Backups']] : [])];
   const [view, setView] = useState(views.some(([v]) => v === start) ? start : 'users');
   return (
     <div>
@@ -1342,6 +1568,7 @@ function Admin({ me, start }) {
       {view === 'users' && <Users me={me} />}
       {view === 'grants' && <Grants me={me} />}
       {view === 'audit' && <Audit />}
+      {view === 'pipeline' && <PipelineSettings />}
       {view === 'ai' && <AiAccess />}
       {view === 'settings' && <Settings />}
       {view === 'backups' && <Backups />}

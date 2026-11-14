@@ -4,6 +4,9 @@
 //   /hooks/<token>           incoming deploy hooks
 //   /in/leads                leads from LeadReplyRadar (signed)
 //   /u/<token>               unsubscribe from campaign emails
+//   /in/stripe               payments from Stripe (signed), makes customer accounts
+//   /welcome/<token>         a new customer sets their password
+//   /r/<code>                a customer's share link, goes to the pricing page
 //   any path on your own domain (DNS room) shows that domain's site
 import { NextResponse } from 'next/server';
 
@@ -28,6 +31,11 @@ export function middleware(req) {
   m = pathname.match(/^\/hooks\/([A-Za-z0-9_-]+)$/);
   if (m) return to('hook', m[1], '');
   if (pathname === '/in/leads') return to('leads', '', '');
+  if (pathname === '/in/stripe') return to('stripe', '', '');
+  m = pathname.match(/^\/welcome\/([A-Za-z0-9_-]{20,60})$/);
+  if (m) return to('claim', m[1], '');
+  m = pathname.match(/^\/r\/([a-z0-9]{6,16})$/);
+  if (m) return to('ref', m[1], '');
   m = pathname.match(/^\/u\/([0-9]+\.[A-Za-z0-9_-]+)$/);
   if (m) return to('unsub', m[1], '');
   if (pathname.startsWith('/api/pub')) return new NextResponse('Not found', { status: 404 });

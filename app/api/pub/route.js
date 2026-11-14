@@ -3,6 +3,7 @@
 import { q, fail, HttpError, sha256, same, sign, decrypt, getBlob, loadSession, resourceLevel, isHttps, hostName, licensed, licensedAny, audit, deploySite, readCookie } from '../../../lib/core';
 import * as P from '../../../lib/projects';
 import * as CRM from '../../../lib/crm';
+import * as PL from '../../../lib/pipeline';
 
 CRM.startEngine();
 
@@ -176,6 +177,47 @@ async function serveUnsub(req, t) {
   return unsubPage('Unsubscribe?', 'Press the button to stop getting these emails.', `<form method="post"><button style="font-size:17px;padding:10px 20px;border-radius:10px;border:0;background:#1f6feb;color:#fff">Unsubscribe</button></form>`);
 }
 
+/* ---------------- payments from Stripe ---------------- */
+async function serveStripe(req) {
+  if (req.method !== 'POST') return json({ error: 'Use POST' }, 405);
+  const raw = await req.text();
+  if (raw.length > 500000) return json({ error: 'Too big' }, 413);
+  const st = await PL.pipeSettings();
+  if (!st.whsec_enc) return json({ error: 'Payments are not set up here yet.' }, 503);
+  if (!PL.verifyStripe(raw, req.headers.get('stripe-signature'), decrypt(st.whsec_enc))) return json({ error: 'Bad signature' }, 400);
+  let evt;
+  try { evt = JSON.parse(raw); } catch { return json({ error: 'Send JSON' }, 400); }
+  const base = (isHttps(req) ? 'https://' : 'http://') + (req.headers.get('x-forwarded-host') || req.headers.get('host'));
+  if (!st.baseUrl) await PL.savePipeSettings({ baseUrl: base });
+  const note = await PL.handleStripe(evt, base);
+  if (note !== 'not used' && note !== 'already handled') await audit(null, 'stripe.' + String(evt.type).slice(0, 60), note, (req.headers.get('x-forwarded-for') || '').split(',')[0]);
+  return json({ received: true });
+}
+
+/* ---------------- a new customer sets their password ---------------- */
+const esc = (t) => String(t).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+async function serveClaim(req, t) {
+  const form = (msg = '') => unsubPage('Set your password', `${msg ? '<b style="color:#b42318">' + esc(msg) + '</b><br>' : ''}Pick a password with at least 10 characters. You will sign in with your email and this password.`,
+    `<form method="post"><input type="password" name="password" minlength="10" required autocomplete="new-password" placeholder="New password" style="font-size:17px;padding:10px;border-radius:10px;border:1px solid #ccd;width:100%;box-sizing:border-box;margin:8px 0"><input type="password" name="again" minlength="10" required autocomplete="new-password" placeholder="Type it again" style="font-size:17px;padding:10px;border-radius:10px;border:1px solid #ccd;width:100%;box-sizing:border-box;margin:8px 0"><button style="font-size:17px;padding:10px 20px;border-radius:10px;border:0;background:#f0883e;color:#2b1400;font-weight:600">Save my password</button></form>`);
+  if (req.method === 'POST') {
+    const f = new URLSearchParams(await req.text());
+    const pw = f.get('password') || '';
+    if (pw.length < 10) return form('That password is too short.');
+    if (pw !== f.get('again')) return form('The two passwords are not the same.');
+    const u = await PL.claim(t, pw);
+    if (!u) return unsubPage('This link has expired', 'Press Get help on the pricing page or reply to your welcome email, and we will send a new link.');
+    await audit({ username: u.username }, 'customer.password_set', u.email, (req.headers.get('x-forwarded-for') || '').split(',')[0]);
+    return unsubPage('Your password is saved', `Now sign in with your email (${esc(u.email)}) and the password you just picked. The app will help you turn on 2-step sign-in.`, '<p><a href="/" style="font-size:17px;color:#1f6feb">Sign in</a></p>');
+  }
+  if (req.method !== 'GET' && req.method !== 'HEAD') return json({ error: 'Use GET or POST' }, 405);
+  return form();
+}
+
+/* ---------------- share links ---------------- */
+function serveRef(req, code) {
+  return new Response(null, { status: 302, headers: { Location: '/pricing?ref=' + encodeURIComponent(code), 'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer' } });
+}
+
 async function handle(req) {
   try {
     const url = new URL(req.url);
@@ -188,6 +230,9 @@ async function handle(req) {
     if (kind === 'hook') return await serveHook(req, a);
     if (kind === 'leads') return await serveLeads(req);
     if (kind === 'unsub') return await serveUnsub(req, a);
+    if (kind === 'stripe') return await serveStripe(req);
+    if (kind === 'claim') return await serveClaim(req, a);
+    if (kind === 'ref') return serveRef(req, a);
     return page(404, 'Not found', 'Nothing here.');
   } catch (e) {
     if (e instanceof HttpError) return json({ error: e.message }, e.status);

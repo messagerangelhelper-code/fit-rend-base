@@ -8,6 +8,7 @@ import {
 } from '../../lib/core';
 import * as P from '../../lib/projects';
 import * as CRM from '../../lib/crm';
+import * as PL from '../../lib/pipeline';
 import crypto from 'crypto';
 import { promises as dns } from 'dns';
 
@@ -160,7 +161,9 @@ const OPEN = {
     return json({ ok: true }, 200, { 'Set-Cookie': cookie(req, t, 43200) });
   },
   async login({ req, body }) {
-    const r = await q('select * from aio.users where username = $1', [String(body.username || '').trim()]);
+    // Customers sign in with their email. Everyone else signs in with their user name.
+    const who = String(body.username || '').trim();
+    const r = await q("select * from aio.users where username = $1 or (email <> '' and lower(email) = lower($1)) order by (username = $1) desc limit 1", [who]);
     const u = r.rows[0];
     if (u && u.locked_until && new Date(u.locked_until) > new Date()) fail(429, 'LOCKED', 'Too many wrong tries. This account is locked for 15 minutes.');
     const ok = u ? checkPassword(body.password, u.pass_hash) : checkPassword(body.password, 'scrypt$AAAAAAAAAAAAAAAAAAAAAA==$AAAA');
@@ -225,6 +228,7 @@ async function meOf(s) {
     clearedUntil: s.cleared_at ? new Date(new Date(s.cleared_at).getTime() + st.clearanceMinutes * 60000).toISOString() : null,
     idleMinutes: st.idleMinutes, ai: Boolean(s.ai),
     rendUntil: rendOpen(s) ? new Date(s.rend_until).toISOString() : null,
+    customer: Boolean(s.is_customer), plan: s.plan || '',
   };
 }
 
@@ -307,7 +311,159 @@ const ACCOUNT = {
 };
 
 /* ---------------- main actions ---------------- */
+const baseOf = (req) => (isHttps(req) ? 'https://' : 'http://') + (req.headers.get('x-forwarded-host') || req.headers.get('host'));
+const needOwner = (s) => { if (!s.is_owner) fail(403, 'LEVEL', 'Only the owner can change the customer pipeline.'); };
 const MAIN = {
+  /* ---------- customer pipeline: a customer's own space ---------- */
+  async myHome({ req, s }) {
+    const u = (await q('select plan, ref_code, is_customer from aio.users where id = $1', [s.user_id])).rows[0];
+    const st = await PL.pipeSettings();
+    const t = await q('select id, room, message, status, reply, created_at, updated_at from aio.tickets where user_id = $1 order by id desc limit 20', [s.user_id]);
+    const out = { customer: u.is_customer, plan: u.plan, planName: PL.PLAN_NAMES[u.plan] || '', tickets: t.rows };
+    if (u.is_customer) {
+      out.limits = PL.PLAN_LIMITS[u.plan] || PL.PLAN_LIMITS.starter;
+      out.used = await PL.customerUse(s.user_id);
+      const repos = await q("select r.id, r.name from aio.grants g join aio.repos r on r.id = g.resource_id where g.user_id = $1 and g.kind = 'repo' order by r.name", [s.user_id]);
+      const projects = await q("select p.id, p.slug, p.name from aio.grants g join aio.projects p on p.id = g.resource_id where g.user_id = $1 and g.kind = 'project' order by p.slug", [s.user_id]);
+      out.repos = repos.rows; out.projects = projects.rows;
+      if (st.rewardsOn && u.ref_code) {
+        const rr = await q("select count(*)::int as friends, count(*) filter (where status = 'given')::int as given from aio.referrals where referrer_id = $1", [s.user_id]);
+        out.share = { link: `${baseOf(req)}/r/${u.ref_code}`, ...rr.rows[0] };
+      }
+    }
+    return out;
+  },
+  async myRepoCreate({ req, s, body }) {
+    if (!s.is_customer) fail(400, 'BAD', 'This button is for customer accounts.');
+    const lim = PL.PLAN_LIMITS[s.plan] || PL.PLAN_LIMITS.starter;
+    if ((await PL.customerUse(s.user_id)).repos >= lim.repos) fail(400, 'PLAN', `Your plan has room for ${lim.repos} code space${lim.repos === 1 ? '' : 's'}. Pick a bigger plan for more.`);
+    const short = String(body.name || 'app').trim().toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '').slice(0, 30) || 'app';
+    const name = `${s.username}-${short}`.slice(0, 60);
+    const r = await q('insert into aio.repos (name, description, created_by) values ($1,$2,$3) on conflict do nothing returning id', [name, 'Code space for ' + s.username, s.username]);
+    if (!r.rows[0]) fail(400, 'BAD', 'You already have a code space with that name.');
+    await writeCommit(r.rows[0].id, s.username, 'First commit', [{ path: 'README.md', data: Buffer.from(`# ${short}\n\nPut your app's files here.\n`) }]);
+    await q("insert into aio.grants (user_id, kind, resource_id, level) values ($1, 'repo', $2, 'admin') on conflict do nothing", [s.user_id, r.rows[0].id]);
+    await audit(s, 'customer.repo', name, ipOf(req));
+    return { id: r.rows[0].id, name };
+  },
+  async myProjectCreate({ req, s, body }) {
+    if (!s.is_customer) fail(400, 'BAD', 'This button is for customer accounts.');
+    needCleared(s);
+    const lim = PL.PLAN_LIMITS[s.plan] || PL.PLAN_LIMITS.starter;
+    if ((await PL.customerUse(s.user_id)).projects >= lim.projects) fail(400, 'PLAN', `Your plan has room for ${lim.projects} database${lim.projects === 1 ? '' : 's'}. Pick a bigger plan for more.`);
+    const short = String(body.name || 'data').trim().toLowerCase().replace(/[^a-z0-9_]/g, '_').replace(/_+/g, '_').slice(0, 16) || 'data';
+    const p = await P.createProject(`c${s.user_id}_${short}`.slice(0, 31), body.name || short, s.username);
+    await q("insert into aio.grants (user_id, kind, resource_id, level) values ($1, 'project', $2, 'admin') on conflict do nothing", [s.user_id, p.id]);
+    await audit(s, 'customer.project', p.slug, ipOf(req));
+    return { id: p.id, slug: p.slug };
+  },
+  /* ---------- Get help ---------- */
+  async ticketOpen({ req, s, body }) {
+    const t = await PL.openTicket(s, body.room, body.message);
+    await audit(s, 'help.open', `#${t.id} in ${t.room}`, ipOf(req));
+    return { id: t.id };
+  },
+  async ticketList({ s, body }) {
+    needSection(s, 'contacts', 'viewer');
+    const status = body.status === 'closed' ? 'closed' : 'open';
+    const r = await q(`select t.*, u.email, u.plan from aio.tickets t left join aio.users u on u.id = t.user_id where t.status = $1 order by t.id desc limit 200`, [status]);
+    const n = await q("select count(*) filter (where status = 'open')::int as open from aio.tickets");
+    return { tickets: r.rows, open: n.rows[0].open };
+  },
+  async ticketReply({ req, s, body }) {
+    needSection(s, 'contacts', 'developer');
+    const reply = String(body.reply || '').trim();
+    if (!reply) fail(400, 'BAD', 'Type your answer first.');
+    const t = await PL.closeTicket(Number(body.id), reply, s.username);
+    await audit(s, 'help.answer', '#' + t.id, ipOf(req));
+    return { ok: true };
+  },
+  /* ---------- pipeline board ---------- */
+  async pipelineBoard({ s }) {
+    needSection(s, 'contacts', 'viewer');
+    return { columns: await PL.board() };
+  },
+  async contactStage({ req, s, body }) {
+    needSection(s, 'contacts', 'developer');
+    if (!PL.STAGES.includes(body.stage)) fail(400, 'BAD', 'Bad stage');
+    await PL.setStage(Number(body.id), body.stage, 'Moved by ' + s.username);
+    await audit(s, 'contact.stage', `${body.id} -> ${body.stage}`, ipOf(req));
+    return { ok: true };
+  },
+  /* ---------- pipeline switches (owner only) ---------- */
+  async pipelineGet({ req, s }) {
+    needOwner(s);
+    const st = await PL.pipeSettings();
+    const ev = await q('select id, type, note, at from aio.stripe_events order by at desc limit 20');
+    const ws = await q('select status, count(*)::int as n from aio.welcome_sends group by status');
+    return {
+      accountsOn: st.accountsOn, welcomeOn: st.welcomeOn, rewardsOn: st.rewardsOn, hasWhsec: Boolean(st.whsec_enc), hasStripeKey: Boolean(st.stripeKey_enc),
+      rewardCoupon: st.rewardCoupon, welcome: st.welcome, webhookUrl: `${baseOf(req)}/in/stripe`, events: ev.rows,
+      welcomeCounts: Object.fromEntries(ws.rows.map((x) => [x.status, x.n])),
+    };
+  },
+  async pipelineSet({ req, s, body }) {
+    needOwner(s); needCleared(s);
+    const patch = { baseUrl: baseOf(req) };
+    for (const k of ['accountsOn', 'welcomeOn', 'rewardsOn']) if (body[k] !== undefined) patch[k] = Boolean(body[k]);
+    if (body.welcome !== undefined) patch.welcome = PL.cleanWelcome(body.welcome);
+    if (body.whsec !== undefined) {
+      const v = String(body.whsec || '').trim();
+      if (v && !/^whsec_[A-Za-z0-9]{16,}$/.test(v)) fail(400, 'BAD', 'The signing secret starts with whsec_. Copy it from the webhook page in Stripe.');
+      patch.whsec_enc = v ? encrypt(v) : '';
+    }
+    if (body.stripeKey !== undefined) {
+      const v = String(body.stripeKey || '').trim();
+      if (v && !/^(rk|sk)_(live|test)_[A-Za-z0-9]{16,}$/.test(v)) fail(400, 'BAD', 'That is not a Stripe key. It starts with rk_live_ (best: a restricted key).');
+      patch.stripeKey_enc = v ? encrypt(v) : '';
+    }
+    if (body.rewardCoupon !== undefined) {
+      const v = String(body.rewardCoupon || '').trim();
+      if (v && !/^[A-Za-z0-9_-]{2,60}$/.test(v)) fail(400, 'BAD', 'Type the coupon ID from Stripe, like FREEMONTH.');
+      patch.rewardCoupon = v;
+    }
+    if ((patch.accountsOn || patch.welcomeOn) && !(await PL.pipeSettings()).whsec_enc && !patch.whsec_enc) fail(400, 'BAD', 'Save the Stripe signing secret first.');
+    await PL.savePipeSettings(patch);
+    await audit(s, 'pipeline.settings', Object.keys(patch).filter((k) => k !== 'baseUrl').map((k) => (k.endsWith('_enc') ? k.replace('_enc', '') + (patch[k] ? ' saved' : ' removed') : typeof patch[k] === 'boolean' ? `${k}=${patch[k]}` : k)).join(', '), ipOf(req));
+    return { ok: true };
+  },
+  async welcomeTest({ req, s, body }) {
+    needOwner(s);
+    const to = CRM.cleanEmail(body.to);
+    if (!to) fail(400, 'BAD', 'Type the email address for the test.');
+    const i = Math.max(0, Math.min(2, Number(body.step) || 0));
+    const st = await PL.pipeSettings(); const crm = await CRM.crmSettings();
+    const mail = PL.renderWelcome(st.welcome[i], { id: 0, email: to, name: s.name || s.username, plan: 'starter', ref_code: 'sample1234', contact_id: null }, baseOf(req), crm.footer || '(Your business name and mailing address go here)', 'test-link-does-not-work');
+    try { await CRM.callLrr('send', { key: 'wtest-' + token(8), ...mail, subject: '[Test] ' + mail.subject, test: true }, 70000); }
+    catch (e) { fail(400, 'LINK', e.message); }
+    await audit(s, 'pipeline.welcome_test', `email ${i + 1} -> ${to}`, ipOf(req));
+    return { ok: true };
+  },
+  async customerList({ s }) {
+    needOwner(s);
+    const r = await q(`select u.id, u.username, u.name, u.email, u.plan, u.disabled, u.created_at, u.ref_code, (u.claim_hash is null and not u.must_change) as claimed,
+      (select count(*)::int from aio.tickets t where t.user_id = u.id and t.status = 'open') as open_tickets
+      from aio.users u where u.is_customer order by u.id desc limit 500`);
+    const ref = await q(`select f.id, f.friend_email, f.status, f.note, f.created_at, f.given_at, u.email as referrer_email, u.username as referrer
+      from aio.referrals f join aio.users u on u.id = f.referrer_id order by f.id desc limit 200`);
+    return { customers: r.rows, referrals: ref.rows };
+  },
+  async customerLink({ req, s, body }) {
+    needOwner(s); needCleared(s);
+    const r = await q('select id, email from aio.users where id = $1 and is_customer', [Number(body.userId)]);
+    if (!r.rows[0]) fail(404, 'NOTFOUND', 'Customer not found');
+    const t = await PL.newClaim(r.rows[0].id);
+    await audit(s, 'customer.link', r.rows[0].email, ipOf(req));
+    return { link: `${baseOf(req)}/welcome/${t}`, email: r.rows[0].email };
+  },
+  async referralMark({ req, s, body }) {
+    needOwner(s);
+    const r = await q("update aio.referrals set status = 'given', given_at = now(), note = 'Marked given by ' || $2 where id = $1 and status <> 'given' returning friend_email", [Number(body.id), s.username]);
+    if (!r.rowCount) fail(404, 'NOTFOUND', 'Reward not found or already given');
+    await audit(s, 'referral.given', r.rows[0].friend_email, ipOf(req));
+    return { ok: true };
+  },
+
   /* ---------- contacts and email campaigns ---------- */
   async contactList({ s, body }) {
     needSection(s, 'contacts', 'viewer');

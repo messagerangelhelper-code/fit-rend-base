@@ -33,6 +33,8 @@ th,td{border-bottom:1px solid var(--line);padding:6px 8px;text-align:left;white-
 /* Every other button is orange, so buttons side by side are easy to tell apart. Red (delete) buttons stay red. */
 :is(.row,.top,.gd-nav,.gd-tiles,.keybox,.box,.all,.list>div)>button:nth-of-type(even):not(.danger):not(.link):not(.pill){background:var(--orange);border-color:var(--orange);color:#2b1400;font-weight:600}
 .top>button.pill:nth-of-type(even){border-color:var(--orange);color:#ffc08a}
+/* Pipeline board: one column per stage, side by side; scrolls sideways on a phone. */
+.board{display:grid;grid-auto-flow:column;grid-auto-columns:minmax(200px,1fr);gap:10px;overflow-x:auto;padding-bottom:8px}.board .col{background:var(--bg);border:1px solid var(--line);border-radius:12px;padding:8px;min-height:120px}.board .col .card{margin:8px 0;padding:10px}
 h2{font-size:18px;margin:6px 0 10px}h3{font-size:15px;margin:14px 0 8px}code{background:#0b1015;border:1px solid var(--line);border-radius:5px;padding:1px 5px;font-size:13px}
 `;
 

@@ -43,6 +43,16 @@ export default function Pricing() {
   const [path, setPath] = useState(['where']);
   const [BLACK_FRIDAY, setBF] = useState(false);
   useEffect(() => { const now = Date.now(); setBF(now >= BF_START && now <= BF_END); }, []);
+  // A friend's share link (/r/code) lands here with ?ref=code. Stripe gets the code, so the friend who shared earns a free month.
+  const [ref, setRef] = useState('');
+  useEffect(() => {
+    let r = '';
+    try { r = new URLSearchParams(window.location.search).get('ref') || ''; } catch { /* no address */ }
+    if (/^[a-z0-9]{6,16}$/.test(r)) { try { localStorage.setItem('frb-ref', r); } catch { /* private window */ } }
+    else { try { r = localStorage.getItem('frb-ref') || ''; } catch { r = ''; } }
+    if (/^[a-z0-9]{6,16}$/.test(r)) setRef(r);
+  }, []);
+  const payLink = (p) => (ref ? p.link + '?client_reference_id=' + ref : p.link);
   const cur = path[path.length - 1];
   const go = (next) => setPath((p) => [...p, next]);
   const back = () => setPath((p) => (p.length > 1 ? p.slice(0, -1) : p));
@@ -54,6 +64,7 @@ export default function Pricing() {
       <style dangerouslySetInnerHTML={{ __html: css }} />
       <h1>🔐 Fit-Rend-Base</h1>
       <p className="lead">The all-in-one platform for your apps: your code, your deploys and your database in one place, behind clearance levels and 2-step sign-in.</p>
+      {ref && <div className="bf" style={{ borderColor: 'var(--ok, #3fb950)' }}>A friend sent you here. Welcome! 👋</div>}
       {BLACK_FRIDAY && <div className="bf"><b>Black Friday:</b> type <b>{BF_CODE}</b> at checkout for {BF_TEXT}.</div>}
 
       <div className="box">
@@ -69,7 +80,7 @@ export default function Pricing() {
             <h2>{plan.name}</h2>
             <div><span className="price">{plan.price}</span><span className="per">{plan.per}</span></div>
             <ul>{plan.gets.map((g) => <li key={g}>{g}</li>)}</ul>
-            <a className="btn" href={plan.link} target="_blank" rel="noopener noreferrer"><button className="big primary">💳 Pay {plan.price} with Stripe</button></a>
+            <a className="btn" href={payLink(plan)} target="_blank" rel="noopener noreferrer"><button className="big primary">💳 Pay {plan.price} with Stripe</button></a>
             <p className="small muted">Secure checkout by Stripe. {plan.per === 'a month' ? 'Cancel any time.' : 'One payment.'}{BLACK_FRIDAY ? ` Have a code? Type ${BF_CODE} at checkout.` : ''}</p>
           </>
         )}
